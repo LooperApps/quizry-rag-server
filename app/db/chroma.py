@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 
 import chromadb
@@ -20,6 +21,8 @@ def get_client() -> chromadb.PersistentClient:
     if _client is None:
         with _lock:
             if _client is None:
+                # Ensure the directory exists before ChromaDB tries to open it
+                os.makedirs(settings.chroma_path, exist_ok=True)
                 logger.info(f"Initializing ChromaDB at path: {settings.chroma_path}")
                 _client = chromadb.PersistentClient(
                     path=settings.chroma_path,
@@ -29,11 +32,19 @@ def get_client() -> chromadb.PersistentClient:
 
 def get_collection() -> chromadb.Collection:
     """Return the single shared collection, creating it if necessary."""
-    return get_client().get_or_create_collection(
-        name=COLLECTION_NAME,
-        # cosine similarity is standard for text embeddings
-        metadata={"hnsw:space": "cosine"},
-    )
+    # chromadb 1.x supports both the legacy metadata dict and the new
+    # configuration API. Try the new API first; fall back to legacy.
+    try:
+        return get_client().get_or_create_collection(
+            name=COLLECTION_NAME,
+            configuration={"hnsw:space": "cosine"},
+        )
+    except TypeError:
+        # Older chromadb versions use metadata= instead of configuration=
+        return get_client().get_or_create_collection(
+            name=COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
+        )
 
 
 def count_for_notebooks(notebook_ids: list[str]) -> int:
