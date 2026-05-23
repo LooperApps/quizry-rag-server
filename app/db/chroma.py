@@ -1,5 +1,6 @@
 import logging
 import os
+import tempfile
 import threading
 
 import chromadb
@@ -15,18 +16,43 @@ _lock = threading.Lock()
 COLLECTION_NAME = "notebook_docs"
 
 
+def _resolve_chroma_path() -> str:
+    """
+    Return a writable path for ChromaDB storage.
+    Tries the configured path first; falls back to /tmp/chroma if not writable
+    (e.g. Render persistent disk not yet mounted).
+    """
+    path = settings.chroma_path
+    try:
+        os.makedirs(path, exist_ok=True)
+        # Quick write-access probe
+        probe = os.path.join(path, ".write_probe")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+        logger.info(f"ChromaDB path is writable: {path}")
+        return path
+    except OSError as e:
+        fallback = os.path.join(tempfile.gettempdir(), "chroma")
+        logger.warning(
+            f"ChromaDB path '{path}' is not writable ({e}). "
+            f"Falling back to {fallback}. "
+            f"Data will NOT persist across restarts. "
+            f"Fix: attach a persistent disk at '{path}' in the Render dashboard."
+        )
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
+
+
 def get_client() -> chromadb.PersistentClient:
     """Return the singleton ChromaDB persistent client."""
     global _client
     if _client is None:
         with _lock:
             if _client is None:
-                # Ensure the directory exists before ChromaDB tries to open it
-                os.makedirs(settings.chroma_path, exist_ok=True)
-                logger.info(f"Initializing ChromaDB at path: {settings.chroma_path}")
-                _client = chromadb.PersistentClient(
-                    path=settings.chroma_path,
-                )
+                path = _resolve_chroma_path()
+                logger.info(f"Initializing ChromaDB at path: {path}")
+                _client = chromadb.PersistentClient(path=path)
     return _client
 
 
