@@ -44,7 +44,7 @@ services:
 
       # Set to true temporarily to debug via /docs
       - key: ENABLE_DOCS
-        value: "false"
+        value: "true"
 
       # Disable ChromaDB telemetry (replaces the removed chromadb.config.Settings)
       - key: ANONYMIZED_TELEMETRY
