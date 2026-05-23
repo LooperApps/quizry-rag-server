@@ -46,6 +46,10 @@ services:
       - key: ENABLE_DOCS
         value: "false"
 
+      # Disable ChromaDB telemetry (replaces the removed chromadb.config.Settings)
+      - key: ANONYMIZED_TELEMETRY
+        value: "false"
+
     disk:
       name: chroma-data
       mountPath: /data/chroma

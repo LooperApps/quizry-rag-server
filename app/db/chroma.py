@@ -2,7 +2,6 @@ import logging
 import threading
 
 import chromadb
-from chromadb.config import Settings as ChromaSettings
 
 from app.config import settings
 
@@ -24,7 +23,6 @@ def get_client() -> chromadb.PersistentClient:
                 logger.info(f"Initializing ChromaDB at path: {settings.chroma_path}")
                 _client = chromadb.PersistentClient(
                     path=settings.chroma_path,
-                    settings=ChromaSettings(anonymized_telemetry=False),
                 )
     return _client
 
