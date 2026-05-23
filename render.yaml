@@ -1,0 +1,52 @@
+services:
+  - type: web
+    name: quizry-rag-server
+    runtime: python
+    region: oregon  # change to frankfurt (eu-central) if your users are in the Middle East/EU
+    plan: starter   # upgrade to standard for more RAM (recommended for large ingestion jobs)
+
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+
+    # Single gunicorn worker to avoid ChromaDB concurrent-write issues.
+    # The event loop inside the worker handles concurrency for I/O-bound operations.
+    # Increase --timeout for very large documents (current: 600s = 10 min).
+    startCommand: >
+      gunicorn app.main:app
+      --worker-class uvicorn.workers.UvicornWorker
+      --workers 1
+      --bind 0.0.0.0:$PORT
+      --timeout 600
+      --keep-alive 5
+      --access-logfile -
+
+    healthCheckPath: /health
+
+    envVars:
+      # Set these in the Render dashboard — never commit real values
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: RAG_API_KEY
+        sync: false
+
+      # ChromaDB persistent disk mount point
+      - key: CHROMA_PATH
+        value: /data/chroma
+
+      # LLM used for chunking and reranking (gpt-4.1-nano is cheap and fast)
+      - key: LITELLM_MODEL
+        value: openai/gpt-4.1-nano
+
+      - key: EMBEDDING_MODEL
+        value: text-embedding-3-large
+
+      - key: LOG_LEVEL
+        value: INFO
+
+      # Set to true temporarily to debug via /docs
+      - key: ENABLE_DOCS
+        value: "false"
+
+    disk:
+      name: chroma-data
+      mountPath: /data/chroma
+      sizeGB: 10   # ~1M chunks; increase as your user base grows

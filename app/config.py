@@ -1,0 +1,36 @@
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    # Required
+    openai_api_key: str
+    rag_api_key: str  # Shared secret — set in Render dashboard + Firebase Functions config
+
+    # ChromaDB storage path (Render persistent disk mount point)
+    chroma_path: str = "/data/chroma"
+
+    # Model identifiers (litellm model strings)
+    litellm_model: str = "openai/gpt-4.1-nano"        # used for chunking + reranking
+    embedding_model: str = "text-embedding-3-large"   # OpenAI embedding model
+
+    # Retrieval tuning
+    retrieval_k: int = 20   # how many docs to pull per query vector
+    final_k: int = 10       # how many to return after reranking
+
+    # Chunking concurrency (ThreadPoolExecutor workers)
+    chunk_workers: int = 3
+
+    # Logging
+    log_level: str = "INFO"
+
+    # FastAPI docs (disable in production, enable for debug)
+    enable_docs: bool = False
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
+
+
+settings = Settings()
