@@ -145,9 +145,8 @@ def _extract_pptx(data: bytes) -> str:
 
 def _extract_image(data: bytes) -> str:
     """
-    OCR an image using OpenAI Vision via litellm (gpt-4o-mini).
-    Using litellm keeps all LLM calls under one authenticated path,
-    avoiding scope issues with restricted project API keys.
+    OCR an image using Google Gemini via litellm (gemini-2.0-flash).
+    Uses GEMINI_API_KEY env var — avoids OpenAI restricted-key scope issues.
     """
     from litellm import completion
 
@@ -163,7 +162,7 @@ def _extract_image(data: bytes) -> str:
         mime = "image/jpeg"  # safe fallback
 
     response = completion(
-        model="openai/gpt-4o-mini",
+        model="gemini/gemini-2.0-flash",
         messages=[
             {
                 "role": "user",
@@ -178,7 +177,7 @@ def _extract_image(data: bytes) -> str:
                     },
                     {
                         "type": "image_url",
-                        "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"},
+                        "image_url": {"url": f"data:{mime};base64,{b64}"},
                     },
                 ],
             }
