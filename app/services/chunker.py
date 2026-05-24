@@ -86,7 +86,7 @@ def _call_llm_chunk(text: str, source: str, notebook_id: str, source_id: str) ->
         model_name=settings.gemini_model,
         generation_config=genai.GenerationConfig(
             response_mime_type="application/json",
-            max_output_tokens=16384,
+            max_output_tokens=65536,
         ),
     )
     response = llm.generate_content(prompt)
