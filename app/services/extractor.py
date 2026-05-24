@@ -145,11 +145,11 @@ def _extract_pptx(data: bytes) -> str:
 
 def _extract_image(data: bytes) -> str:
     """
-    OCR an image using OpenAI Vision (gpt-4o-mini).
-    Returns the extracted text, or raises ValueError if OCR yields nothing.
+    OCR an image using OpenAI Vision via litellm (gpt-4o-mini).
+    Using litellm keeps all LLM calls under one authenticated path,
+    avoiding scope issues with restricted project API keys.
     """
-    from openai import OpenAI
-    from app.config import settings
+    from litellm import completion
 
     b64 = base64.b64encode(data).decode()
     # Detect mime type from magic bytes
@@ -162,9 +162,8 @@ def _extract_image(data: bytes) -> str:
     else:
         mime = "image/jpeg"  # safe fallback
 
-    client = OpenAI(api_key=settings.openai_api_key)
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
+    response = completion(
+        model="openai/gpt-4o-mini",
         messages=[
             {
                 "role": "user",
