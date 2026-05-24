@@ -15,9 +15,9 @@ from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.db.chroma import get_collection, count_for_notebooks, _build_where
-from app.services.embedder import embed_query, _ensure_configured
+from app.services.embedder import embed_query
 from app.services.rewriter import rewrite_query
-import google.generativeai as genai
+from litellm import completion
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -62,17 +62,16 @@ def _rerank(question: str, chunks: list[ChunkResult]) -> list[ChunkResult]:
         preview = chunk.content[:400].replace("\n", " ")
         user_lines.append(f"# CHUNK ID: {i}\n{preview}\n")
 
-    _ensure_configured()
-    model = genai.GenerativeModel(
-        model_name=settings.gemini_model,
-        system_instruction=system_prompt,
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json",
-            response_schema=_RankOrder,
-        ),
+    response = completion(
+        model=settings.litellm_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "\n".join(user_lines)},
+        ],
+        response_format=_RankOrder,
     )
-    response = model.generate_content("\n".join(user_lines))
-    order = _RankOrder.model_validate_json(response.text).order
+
+    order = _RankOrder.model_validate_json(response.choices[0].message.content).order
     # Defensive: ignore out-of-range or duplicate indices
     seen: set[int] = set()
     reranked: list[ChunkResult] = []

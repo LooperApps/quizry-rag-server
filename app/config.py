@@ -9,10 +9,9 @@ class Settings(BaseSettings):
     # ChromaDB storage path (Render persistent disk mount point)
     chroma_path: str = "/data/chroma"
 
-    # Model identifiers
-    gemini_model: str = "gemini-2.5-flash"              # used for reranking (google.generativeai SDK)
-    litellm_model: str = "gemini/gemini-2.5-flash"      # used for chunking (litellm)
-    embedding_model: str = "models/text-embedding-004"  # Google AI embedding model
+    # Model identifiers (litellm model strings)
+    litellm_model: str = "gemini/gemini-2.5-flash"    # used for chunking + reranking
+    embedding_model: str = "gemini/text-embedding-004" # Google AI embedding model
 
     # Retrieval tuning
     retrieval_k: int = 20   # how many docs to pull per query vector
