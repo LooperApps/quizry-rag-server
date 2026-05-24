@@ -3,11 +3,11 @@ File download and text extraction service.
 
 Supported formats (matching index.js inferMimeType):
   pdf, txt, md, html/htm, csv, docx, pptx
-
-Images (png, jpg, jpeg) are not text-extractable — they are skipped gracefully.
+  png, jpg, jpeg  → OCR via OpenAI Vision (gpt-4o-mini)
 """
 
 import io
+import base64
 import logging
 from pathlib import Path
 
@@ -44,6 +44,10 @@ def extract_text(data: bytes, file_name: str) -> str:
         "docx": _extract_docx,
         "pptx": _extract_pptx,
         "json": _extract_plain,
+        "jpg": _extract_image,
+        "jpeg": _extract_image,
+        "png": _extract_image,
+        "webp": _extract_image,
     }
 
     extractor = extractors.get(ext)
@@ -137,3 +141,51 @@ def _extract_pptx(data: bytes) -> str:
         if texts:
             slides.append(f"[Slide {i}]\n" + "\n".join(texts))
     return "\n\n".join(slides)
+
+
+def _extract_image(data: bytes) -> str:
+    """
+    OCR an image using OpenAI Vision (gpt-4o-mini).
+    Returns the extracted text, or raises ValueError if OCR yields nothing.
+    """
+    from openai import OpenAI
+    from app.config import settings
+
+    b64 = base64.b64encode(data).decode()
+    # Detect mime type from magic bytes
+    if data[:3] == b"\xff\xd8\xff":
+        mime = "image/jpeg"
+    elif data[:8] == b"\x89PNG\r\n\x1a\n":
+        mime = "image/png"
+    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        mime = "image/webp"
+    else:
+        mime = "image/jpeg"  # safe fallback
+
+    client = OpenAI(api_key=settings.openai_api_key)
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Extract ALL text visible in this image exactly as written. "
+                            "Preserve headings, bullet points, tables, and formatting. "
+                            "If there is no text, describe the image content in detail instead."
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"},
+                    },
+                ],
+            }
+        ],
+        max_tokens=4096,
+    )
+    text = response.choices[0].message.content or ""
+    logger.info(f"[OCR] Extracted {len(text):,} chars from image")
+    return text
