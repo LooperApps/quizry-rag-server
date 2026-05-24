@@ -162,7 +162,7 @@ def _extract_image(data: bytes) -> str:
         mime = "image/jpeg"  # safe fallback
 
     response = completion(
-        model="gemini/gemini-2.0-flash",
+        model="gemini/gemini-2.5-flash",
         messages=[
             {
                 "role": "user",
