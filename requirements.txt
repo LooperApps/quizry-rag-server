@@ -9,6 +9,7 @@ chromadb>=0.6
 
 # LLM + embeddings
 google-generativeai>=0.8
+litellm>=1.40
 
 # Text extraction
 pypdf>=4.0

@@ -10,7 +10,8 @@ class Settings(BaseSettings):
     chroma_path: str = "/data/chroma"
 
     # Model identifiers
-    gemini_model: str = "gemini-2.5-flash"              # used for chunking + reranking
+    gemini_model: str = "gemini-2.5-flash"              # used for reranking (google.generativeai SDK)
+    litellm_model: str = "gemini/gemini-2.5-flash"      # used for chunking (litellm)
     embedding_model: str = "models/text-embedding-004"  # Google AI embedding model
 
     # Retrieval tuning
