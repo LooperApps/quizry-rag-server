@@ -6,6 +6,7 @@ Uses a ThreadPoolExecutor (instead of multiprocessing) for cross-platform
 compatibility and to avoid issues with uvicorn's worker processes.
 """
 
+import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -73,20 +74,23 @@ def _call_llm_chunk(text: str, source: str, notebook_id: str, source_id: str) ->
         f"  original_text – the exact original text (no changes)\n\n"
         f"Together the chunks must cover the ENTIRE text with no gaps.\n\n"
         f"DOCUMENT:\n{text}\n\n"
-        f"Return JSON."
+        f'Return a JSON object with this exact structure (JSON only, no markdown):\n'
+        f'{{"chunks": [{{"headline": "...", "summary": "...", "original_text": "..."}}]}}'
     )
 
     _ensure_configured()
+    # Use plain JSON mode (response_mime_type only, NO response_schema).
+    # response_schema uses constrained decoding which breaks on Hebrew/Arabic Unicode
+    # because the token-level constraint logic mishandles multi-byte sequences.
     llm = genai.GenerativeModel(
         model_name=settings.gemini_model,
         generation_config=genai.GenerationConfig(
             response_mime_type="application/json",
-            response_schema=Chunks,
             max_output_tokens=16384,
         ),
     )
     response = llm.generate_content(prompt)
-    raw = Chunks.model_validate_json(response.text)
+    raw = Chunks.model_validate(json.loads(response.text))
     results = []
     for chunk in raw.chunks:
         content = f"{chunk.headline}\n\n{chunk.summary}\n\n{chunk.original_text}"
