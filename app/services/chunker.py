@@ -18,10 +18,8 @@ from app.services.embedder import _ensure_configured
 
 logger = logging.getLogger(__name__)
 
-# Target average characters per chunk (used to estimate chunk count for the prompt).
-# Keep this large enough so each LLM call produces ≤ ~10 chunks and the JSON
-# response stays well within Gemini's output-token limit (~8 k tokens).
-AVERAGE_CHUNK_SIZE = 1_500
+# Target average characters per chunk (used to estimate chunk count for the prompt)
+AVERAGE_CHUNK_SIZE = 150
 
 # Max characters sent to the LLM in a single chunking call.
 # Larger texts are split into overlapping sections first.
@@ -84,7 +82,7 @@ def _call_llm_chunk(text: str, source: str, notebook_id: str, source_id: str) ->
         generation_config=genai.GenerationConfig(
             response_mime_type="application/json",
             response_schema=Chunks,
-            max_output_tokens=8192,
+            max_output_tokens=16384,
         ),
     )
     response = llm.generate_content(prompt)
