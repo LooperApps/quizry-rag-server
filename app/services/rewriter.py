@@ -7,10 +7,11 @@ search query that is more likely to surface relevant content in ChromaDB.
 
 import logging
 
-from litellm import completion
+import google.generativeai as genai
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import settings
+from app.services.embedder import _ensure_configured
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +47,9 @@ def rewrite_query(question: str, history: list[dict] | None = None) -> str:
         "Return ONLY the rewritten query — no explanation, no punctuation around it."
     )
 
-    response = completion(
-        model=settings.litellm_model,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    rewritten = response.choices[0].message.content.strip()
+    _ensure_configured()
+    model = genai.GenerativeModel(settings.gemini_model)
+    response = model.generate_content(prompt)
+    rewritten = response.text.strip()
     logger.debug(f"[rewriter] '{question}' → '{rewritten}'")
     return rewritten

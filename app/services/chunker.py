@@ -9,11 +9,12 @@ compatibility and to avoid issues with uvicorn's worker processes.
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from litellm import completion
+import google.generativeai as genai
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import settings
+from app.services.embedder import _ensure_configured
 
 logger = logging.getLogger(__name__)
 
@@ -75,13 +76,16 @@ def _call_llm_chunk(text: str, source: str, notebook_id: str, source_id: str) ->
         f"Return JSON."
     )
 
-    response = completion(
-        model=settings.litellm_model,
-        messages=[{"role": "user", "content": prompt}],
-        response_format=Chunks,
+    _ensure_configured()
+    llm = genai.GenerativeModel(
+        model_name=settings.gemini_model,
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json",
+            response_schema=Chunks,
+        ),
     )
-
-    raw = Chunks.model_validate_json(response.choices[0].message.content)
+    response = llm.generate_content(prompt)
+    raw = Chunks.model_validate_json(response.text)
     results = []
     for chunk in raw.chunks:
         content = f"{chunk.headline}\n\n{chunk.summary}\n\n{chunk.original_text}"

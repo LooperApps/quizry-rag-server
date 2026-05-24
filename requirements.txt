@@ -8,8 +8,7 @@ pydantic-settings>=2.4
 chromadb>=0.6
 
 # LLM + embeddings
-openai>=1.50
-litellm>=1.50
+google-generativeai>=0.8
 
 # Text extraction
 pypdf>=4.0
