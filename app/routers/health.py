@@ -29,8 +29,9 @@ async def health() -> dict:
 
 @router.get("/debug/university")
 async def debug_university() -> dict:
-    """No-auth test: query university_requirements with a hardcoded question."""
+    """No-auth test: query university_requirements and return chunks + final LLM answer."""
     from app.services.retriever import fetch_context
+    from litellm import completion
 
     logger.info(f"[debug] university test: {_DEBUG_QUERY!r}")
     try:
@@ -38,6 +39,24 @@ async def debug_university() -> dict:
             notebook_ids=[_DEBUG_NOTEBOOK],
             question=_DEBUG_QUERY,
         )
+
+        # Build context string from retrieved chunks
+        context = "\n\n---\n\n".join(c.content for c in chunks)
+
+        system_prompt = (
+            "أنت مساعد ذكي مفيد. أجب على أسئلة المستخدم بناءً على المحتوى المرجعي المتوفر.\n\n"
+            f"# المحتوى المرجعي:\n{context}"
+        )
+
+        response = completion(
+            model="gemini/gemini-2.5-flash",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": _DEBUG_QUERY},
+            ],
+        )
+        answer = response.choices[0].message.content.strip()
+
         return {
             "notebook": _DEBUG_NOTEBOOK,
             "query": _DEBUG_QUERY,
@@ -51,6 +70,7 @@ async def debug_university() -> dict:
                 }
                 for c in chunks
             ],
+            "answer": answer,
         }
     except Exception as exc:
         logger.error(f"[debug] university test failed: {exc}", exc_info=True)
