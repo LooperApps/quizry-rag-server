@@ -1,9 +1,7 @@
 """
-LLM-based document chunker.
-
-Ports the chunking logic from week5/pro_implementation/ingest.py.
-Uses a ThreadPoolExecutor (instead of multiprocessing) for cross-platform
-compatibility and to avoid issues with uvicorn's worker processes.
+Document chunker with two modes:
+  default – fast recursive text splitter (no LLM, zero cost, like OpenAI/Google internals)
+  smart   – LLM-based semantic splitting with plain-text delimiter output
 """
 
 import logging
@@ -19,12 +17,66 @@ logger = logging.getLogger(__name__)
 # Target average characters per chunk (used to estimate chunk count for the prompt)
 AVERAGE_CHUNK_SIZE = 150
 
-# Max characters sent to the LLM in a single chunking call.
-# Larger texts are split into overlapping sections first.
+# Max characters sent to the LLM in a single chunking call (smart mode).
 MAX_CHARS_PER_CALL = 12_000
 
-# Overlap in characters between adjacent sections passed to the LLM
+# Overlap in characters between adjacent sections (smart mode)
 SECTION_OVERLAP_CHARS = 500
+
+# Default mode: target chunk size and overlap in characters
+DEFAULT_CHUNK_SIZE = 800
+DEFAULT_OVERLAP = 200
+
+# Separators tried in order for the default recursive splitter
+_SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
+
+
+# ─── Default mode: recursive text splitter (no LLM) ─────────────────────────────────
+
+def _recursive_split(text: str, separators: list[str], chunk_size: int) -> list[str]:
+    """Recursively split text using the first separator that produces chunks ≤ chunk_size."""
+    if len(text) <= chunk_size or not separators:
+        return [text]
+    sep, rest = separators[0], separators[1:]
+    parts = text.split(sep)
+    chunks: list[str] = []
+    current = ""
+    for part in parts:
+        candidate = (current + sep + part) if current else part
+        if len(candidate) <= chunk_size:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current)
+            # part itself may be too long — recurse
+            if len(part) > chunk_size:
+                chunks.extend(_recursive_split(part, rest, chunk_size))
+                current = ""
+            else:
+                current = part
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _chunk_default(
+    text: str, source: str, notebook_id: str, source_id: str
+) -> list[dict]:
+    """Fast recursive splitter with overlap — no LLM, zero cost."""
+    base_chunks = _recursive_split(text, _SEPARATORS, DEFAULT_CHUNK_SIZE)
+    result: list[dict] = []
+    for i, chunk in enumerate(base_chunks):
+        # Add overlap from the previous chunk's tail
+        if i > 0:
+            tail = base_chunks[i - 1][-DEFAULT_OVERLAP:]
+            content = tail + chunk
+        else:
+            content = chunk
+        result.append({
+            "content": content,
+            "metadata": {"notebookId": notebook_id, "sourceId": source_id, "source": source},
+        })
+    return result
 
 
 # ─── Core LLM call ────────────────────────────────────────────────────────────
@@ -115,16 +167,20 @@ def chunk_document(
     source: str,
     notebook_id: str,
     source_id: str,
+    mode: str | None = None,
 ) -> list[dict]:
     """
-    Chunk a full document text into overlapping, semantically meaningful pieces.
-
-    For short texts (≤ MAX_CHARS_PER_CALL), a single LLM call is made.
-    For larger texts, the document is split into overlapping sections and
-    processed in parallel using a ThreadPoolExecutor.
-
+    Chunk a document. mode="default" (fast, no LLM) or mode="smart" (LLM-based).
+    Defaults to settings.chunk_mode if not specified.
     Returns a list of dicts: {"content": str, "metadata": dict}
     """
+    effective_mode = mode or settings.chunk_mode
+
+    if effective_mode == "default":
+        logger.info(f"[chunker] default mode for source={source_id}")
+        return _chunk_default(text, source, notebook_id, source_id)
+
+    # smart mode — LLM-based
     sections = _split_into_sections(text, MAX_CHARS_PER_CALL, SECTION_OVERLAP_CHARS)
 
     if len(sections) == 1:

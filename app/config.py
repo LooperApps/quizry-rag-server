@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     # Chunking concurrency (ThreadPoolExecutor workers)
     chunk_workers: int = 3
 
+    # Chunking mode: "default" = fast recursive splitter (no LLM, like OpenAI/Google)
+    #                "smart"   = LLM-based semantic splitting
+    chunk_mode: str = "default"
+
     # Logging
     log_level: str = "INFO"
 
