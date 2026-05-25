@@ -43,7 +43,7 @@ def extract_text(data: bytes, file_name: str) -> str:
         "htm": _extract_html,
         "docx": _extract_docx,
         "pptx": _extract_pptx,
-        "json": _extract_plain,
+        "json": _extract_json,
         "jpg": _extract_image,
         "jpeg": _extract_image,
         "png": _extract_image,
@@ -70,7 +70,32 @@ def _extract_plain(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def _extract_json_UNUSED(data: bytes) -> str:
+def _collect_strings(obj) -> list[str]:
+    """Recursively collect all string leaf values from any JSON object."""
+    if isinstance(obj, str):
+        return [obj]
+    if isinstance(obj, list):
+        return [s for item in obj for s in _collect_strings(item)]
+    if isinstance(obj, dict):
+        return [s for v in obj.values() for s in _collect_strings(v)]
+    return []
+
+
+def _extract_json(data: bytes) -> str:
+    """
+    Extract clean text from any JSON file by collecting all string values recursively.
+    Produces pure text with no JSON syntax noise — works for any schema.
+    Falls back to raw UTF-8 if the file is not valid JSON.
+    """
+    import json
+    raw = data.decode("utf-8", errors="replace").lstrip("\ufeff")
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    strings = _collect_strings(obj)
+    logger.info(f"[extractor] _extract_json: collected {len(strings)} string values from JSON")
+    return "\n".join(s for s in strings if s.strip())
     """
     Parse JSON and convert to clean readable text.
     If the JSON is an array of {major, university, requirements} objects
