@@ -79,11 +79,16 @@ def _extract_json(data: bytes) -> str:
     Falls back to raw UTF-8 text for any other JSON shape.
     """
     import json
-    raw = data.decode("utf-8", errors="replace")
+    raw = data.decode("utf-8", errors="replace").lstrip("\ufeff")  # strip BOM
     try:
         obj = json.loads(raw)
     except json.JSONDecodeError:
+        logger.warning("[extractor] _extract_json: not valid JSON, returning raw text")
         return raw  # not valid JSON — treat as plain text
+
+    logger.info(f"[extractor] _extract_json: type={type(obj).__name__}, "
+                f"len={len(obj) if isinstance(obj, list) else 'n/a'}, "
+                f"first_keys={list(obj[0].keys()) if isinstance(obj, list) and obj and isinstance(obj[0], dict) else 'n/a'}")
 
     # Detect university requirements format: list of {major, university, requirements}
     if (
@@ -105,9 +110,11 @@ def _extract_json(data: bytes) -> str:
                 req_lines = str(reqs)
             block = f"אוניברסיטה: {university}\nתחום: {major}\nתנאי קבלה:\n{req_lines}"
             blocks.append(block)
+        logger.info(f"[extractor] _extract_json: produced {len(blocks)} university blocks")
         return "\n\n".join(blocks)
 
     # Fallback: pretty-print or raw
+    logger.warning("[extractor] _extract_json: unknown JSON shape, returning raw text")
     return raw
 
 
