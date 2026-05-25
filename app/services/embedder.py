@@ -25,6 +25,11 @@ def _get_client() -> genai.Client:
         with _lock:
             if _client is None:
                 _client = genai.Client(api_key=settings.gemini_api_key)
+                try:
+                    models = [m.name for m in _client.models.list()]
+                    logger.info(f"[embedder] Available models: {models}")
+                except Exception as e:
+                    logger.warning(f"[embedder] Could not list models: {e}")
     return _client
 
 
