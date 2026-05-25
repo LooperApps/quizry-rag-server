@@ -79,6 +79,26 @@ def _chunk_default(
     return result
 
 
+# ─── Pre-split mode: one chunk per <<<ENTRY>>> marker ───────────────────────────
+
+_ENTRY_DELIMITER = "<<<ENTRY>>>"
+
+
+def _chunk_pre_split(
+    text: str, source: str, notebook_id: str, source_id: str
+) -> list[dict]:
+    """Split on <<<ENTRY>>> markers — one chunk per structural entry (e.g. each JSON object)."""
+    entries = [e.strip() for e in text.split(_ENTRY_DELIMITER) if e.strip()]
+    logger.info(f"[chunker] pre-split mode: {len(entries)} entries for source={source_id}")
+    return [
+        {
+            "content": entry,
+            "metadata": {"notebookId": notebook_id, "sourceId": source_id, "source": source},
+        }
+        for entry in entries
+    ]
+
+
 # ─── Core LLM call ────────────────────────────────────────────────────────────
 
 @retry(
@@ -175,6 +195,10 @@ def chunk_document(
     Returns a list of dicts: {"content": str, "metadata": dict}
     """
     effective_mode = mode or settings.chunk_mode
+
+    if _ENTRY_DELIMITER in text:
+        logger.info(f"[chunker] pre-split mode for source={source_id}")
+        return _chunk_pre_split(text, source, notebook_id, source_id)
 
     if effective_mode == "default":
         logger.info(f"[chunker] default mode for source={source_id}")

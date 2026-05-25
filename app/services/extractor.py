@@ -122,7 +122,7 @@ def _extract_json(data: bytes) -> str:
             block = f"אוניברסיטה: {university}\nתחום: {major}\nתנאי קבלה:\n{req_lines}"
             blocks.append(block)
         logger.info(f"[extractor] _extract_json: produced {len(blocks)} university blocks")
-        return "\n\n".join(blocks)
+        return "\n<<<ENTRY>>>\n".join(blocks)
 
     # Fallback: raw
     logger.warning(f"[extractor] _extract_json: unknown JSON shape, returning raw. first_keys={list(entries[0].keys()) if isinstance(entries, list) and entries and isinstance(entries[0], dict) else 'n/a'}")
