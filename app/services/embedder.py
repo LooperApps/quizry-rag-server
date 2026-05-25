@@ -4,6 +4,7 @@ GEMINI_API_KEY env var is read automatically by litellm for Google AI embeddings
 """
 
 import logging
+import time
 
 from litellm import embedding as litellm_embedding
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -52,4 +53,9 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 def embed_query(text: str) -> list[float]:
     """Embed a single query string."""
-    return _embed_batch([text])[0]
+    t0 = time.perf_counter()
+    logger.info(f"[embedder] embedding query model={settings.embedding_model} text={text!r}")
+    result = _embed_batch([text])[0]
+    elapsed = int((time.perf_counter() - t0) * 1000)
+    logger.info(f"[embedder] done elapsed={elapsed}ms dims={len(result)}")
+    return result

@@ -6,6 +6,7 @@ search query that is more likely to surface relevant content in ChromaDB.
 """
 
 import logging
+import time
 
 from litellm import completion
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -50,10 +51,13 @@ def rewrite_query(question: str, history: list[dict] | None = None) -> str:
         "Return ONLY the rewritten query — no explanation, no punctuation around it."
     )
 
+    t0 = time.perf_counter()
+    logger.info(f"[rewriter] calling model={settings.litellm_model} question={question!r}")
     response = completion(
         model=settings.litellm_model,
         messages=[{"role": "user", "content": prompt}],
     )
     rewritten = response.choices[0].message.content.strip()
-    logger.debug(f"[rewriter] '{question}' → '{rewritten}'")
+    elapsed = int((time.perf_counter() - t0) * 1000)
+    logger.info(f"[rewriter] done elapsed={elapsed}ms result={rewritten!r}")
     return rewritten

@@ -10,6 +10,7 @@ production enhancements:
 """
 
 import logging
+import time
 
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -164,33 +165,59 @@ def fetch_context(
     """
     final_k = k or settings.final_k
     retrieval_k = settings.retrieval_k
+    t_total = time.perf_counter()
 
-    # Fast-path: nothing ingested yet for these notebooks
+    logger.info(
+        f"[retriever] START notebooks={notebook_ids} question={question!r} "
+        f"retrieval_k={retrieval_k} final_k={final_k}"
+    )
+
+    # Step 0: Fast-path — nothing ingested yet for these notebooks
+    t0 = time.perf_counter()
     total = count_for_notebooks(notebook_ids)
+    logger.info(f"[retriever] step=count docs_in_index={total} elapsed={_ms(t0)}ms")
     if total == 0:
         logger.info(f"[retriever] No documents indexed for notebooks {notebook_ids}")
         return [], question
 
-    # 1. Query rewrite (translates Arabic → Hebrew to match Hebrew KB content)
+    # Step 1: Query rewrite (translates Arabic → Hebrew to match Hebrew KB content)
     rewritten = question
     try:
+        t1 = time.perf_counter()
         rewritten = rewrite_query(question, history)
+        logger.info(
+            f"[retriever] step=rewrite elapsed={_ms(t1)}ms "
+            f"original={question!r} rewritten={rewritten!r}"
+        )
     except Exception as exc:
-        logger.warning(f"[retriever] Query rewrite failed, using original: {exc}")
+        logger.warning(f"[retriever] step=rewrite FAILED, using original: {exc}")
 
-    # 2. Single vector search using rewritten (Hebrew) query.
-    # Dual-vector search is skipped: the original Arabic query produces poor matches
-    # against Hebrew KB content, so the rewritten query is strictly better.
+    # Step 2: Embed the rewritten query
+    t2 = time.perf_counter()
     vec = embed_query(rewritten)
+    logger.info(f"[retriever] step=embed elapsed={_ms(t2)}ms dims={len(vec)}")
+
+    # Step 3: ChromaDB similarity search
+    t3 = time.perf_counter()
     chunks = _query_chroma(notebook_ids, vec, retrieval_k)
+    logger.info(
+        f"[retriever] step=chroma_query elapsed={_ms(t3)}ms "
+        f"retrieved={len(chunks)} sources={list({c.source for c in chunks})}"
+    )
 
     if not chunks:
+        logger.info(f"[retriever] No chunks returned from ChromaDB")
         return [], rewritten
 
-    # 3. Return top-k by vector similarity — LLM reranking removed (saves ~4-8s per request).
-    # ChromaDB already returns results ordered by cosine distance; that ordering is sufficient.
+    # Step 4: Trim to final_k (ChromaDB already orders by cosine distance)
+    result = chunks[:final_k]
     logger.info(
-        f"[retriever] notebooks={notebook_ids} retrieved={len(chunks)} "
-        f"final={min(final_k, len(chunks))}"
+        f"[retriever] DONE total_elapsed={_ms(t_total)}ms "
+        f"returned={len(result)}/{len(chunks)} chunks"
     )
-    return chunks[:final_k], rewritten
+    return result, rewritten
+
+
+def _ms(t: float) -> int:
+    """Milliseconds since a perf_counter snapshot."""
+    return int((time.perf_counter() - t) * 1000)

@@ -5,6 +5,7 @@ POST /retrieve — retrieve top-k RAG context chunks for a question.
 """
 
 import logging
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -33,9 +34,10 @@ logger = logging.getLogger(__name__)
 async def retrieve(req: RetrieveRequest) -> RetrieveResponse:
     # req.notebookIds is always populated by the model validator
     notebook_ids: list[str] = req.notebookIds  # type: ignore[assignment]
+    t_start = time.perf_counter()
 
     logger.info(
-        f"[retrieve] notebooks={notebook_ids} k={req.k} "
+        f"[retrieve] REQUEST notebooks={notebook_ids} k={req.k} "
         f"question={req.question[:80]!r}"
     )
 
@@ -48,6 +50,12 @@ async def retrieve(req: RetrieveRequest) -> RetrieveResponse:
             k=req.k,
         )
 
+        total_ms = int((time.perf_counter() - t_start) * 1000)
+        logger.info(
+            f"[retrieve] RESPONSE notebooks={notebook_ids} "
+            f"chunks={len(chunks)} total_elapsed={total_ms}ms "
+            f"rewritten={rewritten!r if rewritten != req.question else '(unchanged)'}"
+        )
         return RetrieveResponse(
             chunks=[
                 ChunkResult(
@@ -60,8 +68,9 @@ async def retrieve(req: RetrieveRequest) -> RetrieveResponse:
             rewrittenQuery=rewritten if rewritten != req.question else None,
         )
     except Exception as exc:
+        total_ms = int((time.perf_counter() - t_start) * 1000)
         logger.error(
-            f"[retrieve] Failed for notebooks={notebook_ids}: {exc}",
+            f"[retrieve] FAILED notebooks={notebook_ids} elapsed={total_ms}ms: {exc}",
             exc_info=True,
         )
         raise HTTPException(
