@@ -43,7 +43,7 @@ def extract_text(data: bytes, file_name: str) -> str:
         "htm": _extract_html,
         "docx": _extract_docx,
         "pptx": _extract_pptx,
-        "json": _extract_json,
+        "json": _extract_plain,
         "jpg": _extract_image,
         "jpeg": _extract_image,
         "png": _extract_image,
@@ -70,7 +70,7 @@ def _extract_plain(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def _extract_json(data: bytes) -> str:
+def _extract_json_UNUSED(data: bytes) -> str:
     """
     Parse JSON and convert to clean readable text.
     If the JSON is an array of {major, university, requirements} objects
@@ -89,16 +89,19 @@ def _extract_json(data: bytes) -> str:
     logger.info(f"[extractor] _extract_json: type={type(obj).__name__}, "
                 f"len={len(obj) if isinstance(obj, (list, dict)) else 'n/a'}")
 
-    # Resolve top-level dict: find the first value that is a list of university entries
+    # Resolve top-level dict: collect ALL values that are lists of university entries
     entries = obj
     if isinstance(obj, dict):
+        all_entries: list = []
         for v in obj.values():
-            if isinstance(v, list) and v and isinstance(v[0], dict):
-                entries = v
-                logger.info(f"[extractor] _extract_json: unwrapped dict → list of {len(entries)} items, first_keys={list(v[0].keys())}")
-                break
+            if (isinstance(v, list) and v and isinstance(v[0], dict)
+                    and "major" in v[0] and "university" in v[0] and "requirements" in v[0]):
+                all_entries.extend(v)
+        if all_entries:
+            entries = all_entries
+            logger.info(f"[extractor] _extract_json: merged {len(obj)} dict keys → {len(entries)} total entries")
         else:
-            logger.warning(f"[extractor] _extract_json: dict has no list value, returning raw. keys={list(obj.keys())}")
+            logger.warning(f"[extractor] _extract_json: dict has no matching list values, returning raw. keys={list(obj.keys())[:5]}")
             return raw
 
     # Detect university requirements format: list of {major, university, requirements}
