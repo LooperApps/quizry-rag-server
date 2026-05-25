@@ -17,7 +17,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from app.db.chroma import get_collection, count_for_notebooks, _build_where
 from app.services.embedder import embed_query
 from app.services.rewriter import rewrite_query
-from litellm import completion
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -172,38 +171,26 @@ def fetch_context(
         logger.info(f"[retriever] No documents indexed for notebooks {notebook_ids}")
         return [], question
 
-    # 1. Query rewrite
+    # 1. Query rewrite (translates Arabic → Hebrew to match Hebrew KB content)
     rewritten = question
     try:
         rewritten = rewrite_query(question, history)
     except Exception as exc:
         logger.warning(f"[retriever] Query rewrite failed, using original: {exc}")
 
-    # 2. Dual vector search
-    vec_original = embed_query(question)
-    chunks1 = _query_chroma(notebook_ids, vec_original, retrieval_k)
+    # 2. Single vector search using rewritten (Hebrew) query.
+    # Dual-vector search is skipped: the original Arabic query produces poor matches
+    # against Hebrew KB content, so the rewritten query is strictly better.
+    vec = embed_query(rewritten)
+    chunks = _query_chroma(notebook_ids, vec, retrieval_k)
 
-    chunks2: list[ChunkResult] = []
-    if rewritten != question:
-        try:
-            vec_rewritten = embed_query(rewritten)
-            chunks2 = _query_chroma(notebook_ids, vec_rewritten, retrieval_k)
-        except Exception as exc:
-            logger.warning(f"[retriever] Rewritten-query search failed: {exc}")
-
-    merged = _merge_deduplicate(chunks1, chunks2)
-    if not merged:
+    if not chunks:
         return [], rewritten
 
-    # 3. LLM rerank
-    try:
-        reranked = _rerank(question, merged)
-    except Exception as exc:
-        logger.warning(f"[retriever] Reranking failed, using merged order: {exc}")
-        reranked = merged
-
+    # 3. Return top-k by vector similarity — LLM reranking removed (saves ~4-8s per request).
+    # ChromaDB already returns results ordered by cosine distance; that ordering is sufficient.
     logger.info(
-        f"[retriever] notebooks={notebook_ids} original={len(chunks1)} "
-        f"rewritten={len(chunks2)} merged={len(merged)} final={min(final_k, len(reranked))}"
+        f"[retriever] notebooks={notebook_ids} retrieved={len(chunks)} "
+        f"final={min(final_k, len(chunks))}"
     )
-    return reranked[:final_k], rewritten
+    return chunks[:final_k], rewritten
