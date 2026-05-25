@@ -11,7 +11,7 @@ class Settings(BaseSettings):
 
     # Model identifiers (litellm model strings)
     litellm_model: str = "gemini/gemini-2.5-flash"    # used for chunking + reranking
-    embedding_model: str = "gemini/text-embedding-004" # Google AI embedding model
+    embedding_model: str = "models/text-embedding-004" # Google AI embedding model
 
     # Retrieval tuning
     retrieval_k: int = 20   # how many docs to pull per query vector

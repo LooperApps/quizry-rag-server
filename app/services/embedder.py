@@ -3,8 +3,9 @@ Google AI text embedding service with batching and retry.
 """
 
 import logging
+import threading
 
-from litellm import embedding as litellm_embed
+import google.generativeai as genai
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import settings
@@ -12,6 +13,18 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 EMBED_BATCH_SIZE = 100
+
+_configured = False
+_lock = threading.Lock()
+
+
+def _ensure_configured() -> None:
+    global _configured
+    if not _configured:
+        with _lock:
+            if not _configured:
+                genai.configure(api_key=settings.gemini_api_key)
+                _configured = True
 
 
 @retry(
@@ -21,12 +34,13 @@ EMBED_BATCH_SIZE = 100
 )
 def _embed_batch(texts: list[str]) -> list[list[float]]:
     """Embed a single batch of texts (≤ EMBED_BATCH_SIZE)."""
-    response = litellm_embed(
+    _ensure_configured()
+    result = genai.embed_content(
         model=settings.embedding_model,
-        input=texts,
+        content=texts,
+        task_type="retrieval_document",
     )
-    # Response items are returned in the same order as the input
-    return [item["embedding"] for item in response["data"]]
+    return result["embedding"]
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
@@ -52,4 +66,10 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 def embed_query(text: str) -> list[float]:
     """Embed a single query string."""
-    return _embed_batch([text])[0]
+    _ensure_configured()
+    result = genai.embed_content(
+        model=settings.embedding_model,
+        content=text,
+        task_type="retrieval_query",
+    )
+    return result["embedding"]
