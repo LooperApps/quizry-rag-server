@@ -3,15 +3,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # Required
-    gemini_api_key: str
     rag_api_key: str  # Shared secret — set in Render dashboard + Firebase Functions config
 
     # ChromaDB storage path (Render persistent disk mount point)
     chroma_path: str = "/data/chroma"
 
     # Model identifiers (litellm model strings)
-    litellm_model: str = "gemini/gemini-2.5-flash"    # used for chunking + reranking
-    embedding_model: str = "models/gemini-embedding-001" # Google AI embedding model
+    # GEMINI_API_KEY env var is read automatically by litellm for embedding_model
+    # DEEPSEEK_API_KEY env var is read automatically by litellm for litellm_model
+    litellm_model: str = "deepseek/deepseek-chat"      # used for query rewriting (smart chunking)
+    embedding_model: str = "gemini/gemini-embedding-001" # Google AI embedding model via litellm
 
     # Retrieval tuning
     retrieval_k: int = 20   # how many docs to pull per query vector

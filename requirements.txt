@@ -8,7 +8,7 @@ pydantic-settings>=2.4
 chromadb>=0.6
 
 # LLM + embeddings
-google-genai>=1.0
+# GEMINI_API_KEY env var used by litellm for embeddings; DEEPSEEK_API_KEY for rewriting
 litellm>=1.50
 
 # Text extraction

@@ -1,12 +1,11 @@
 """
-Google AI text embedding service with batching and retry.
+Text embedding service using litellm.
+GEMINI_API_KEY env var is read automatically by litellm for Google AI embeddings.
 """
 
 import logging
-import threading
 
-from google import genai
-from google.genai import types
+from litellm import embedding as litellm_embedding
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import settings
@@ -14,23 +13,6 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 EMBED_BATCH_SIZE = 100
-
-_client: genai.Client | None = None
-_lock = threading.Lock()
-
-
-def _get_client() -> genai.Client:
-    global _client
-    if _client is None:
-        with _lock:
-            if _client is None:
-                _client = genai.Client(api_key=settings.gemini_api_key)
-                try:
-                    models = [m.name for m in _client.models.list()]
-                    logger.info(f"[embedder] Available models: {models}")
-                except Exception as e:
-                    logger.warning(f"[embedder] Could not list models: {e}")
-    return _client
 
 
 @retry(
@@ -40,12 +22,11 @@ def _get_client() -> genai.Client:
 )
 def _embed_batch(texts: list[str]) -> list[list[float]]:
     """Embed a single batch of texts (≤ EMBED_BATCH_SIZE)."""
-    result = _get_client().models.embed_content(
+    response = litellm_embedding(
         model=settings.embedding_model,
-        contents=texts,
-        config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
+        input=texts,
     )
-    return [e.values for e in result.embeddings]
+    return [item["embedding"] for item in response.data]
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
@@ -71,9 +52,4 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 def embed_query(text: str) -> list[float]:
     """Embed a single query string."""
-    result = _get_client().models.embed_content(
-        model=settings.embedding_model,
-        contents=text,
-        config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
-    )
-    return result.embeddings[0].values
+    return _embed_batch([text])[0]
