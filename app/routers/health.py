@@ -37,7 +37,6 @@ async def debug_university() -> dict:
         chunks, rewritten = fetch_context(
             notebook_ids=[_DEBUG_NOTEBOOK],
             question=_DEBUG_QUERY,
-            k=5,
         )
         return {
             "notebook": _DEBUG_NOTEBOOK,

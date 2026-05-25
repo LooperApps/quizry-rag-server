@@ -24,9 +24,9 @@ MAX_CHARS_PER_CALL = 12_000
 SECTION_OVERLAP_CHARS = 500
 
 # Default mode: target chunk size and overlap in characters.
-# ~4 chars per token → 800 tokens ≈ 3200 chars, 400 tokens ≈ 1600 chars.
-DEFAULT_CHUNK_SIZE = 3200
-DEFAULT_OVERLAP = 1600
+# Hebrew is ~1 char/token, so 800 tokens ≈ 800 chars, 400 tokens ≈ 400 chars.
+DEFAULT_CHUNK_SIZE = 800
+DEFAULT_OVERLAP = 400
 
 # Separators tried in order for the default recursive splitter
 _SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
