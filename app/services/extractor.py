@@ -43,7 +43,7 @@ def extract_text(data: bytes, file_name: str) -> str:
         "htm": _extract_html,
         "docx": _extract_docx,
         "pptx": _extract_pptx,
-        "json": _extract_plain,
+        "json": _extract_json,
         "jpg": _extract_image,
         "jpeg": _extract_image,
         "png": _extract_image,
@@ -68,6 +68,47 @@ def extract_text(data: bytes, file_name: str) -> str:
 
 def _extract_plain(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
+
+
+def _extract_json(data: bytes) -> str:
+    """
+    Parse JSON and convert to clean readable text.
+    If the JSON is an array of {major, university, requirements} objects
+    (university requirements format), each entry becomes a labelled text block
+    separated by double newlines — so the chunker never splits mid-entry.
+    Falls back to raw UTF-8 text for any other JSON shape.
+    """
+    import json
+    raw = data.decode("utf-8", errors="replace")
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw  # not valid JSON — treat as plain text
+
+    # Detect university requirements format: list of {major, university, requirements}
+    if (
+        isinstance(obj, list)
+        and obj
+        and isinstance(obj[0], dict)
+        and "major" in obj[0]
+        and "university" in obj[0]
+        and "requirements" in obj[0]
+    ):
+        blocks = []
+        for entry in obj:
+            major = entry.get("major", "").strip()
+            university = entry.get("university", "").strip()
+            reqs = entry.get("requirements", [])
+            if isinstance(reqs, list):
+                req_lines = "\n".join(f"- {r}" for r in reqs if r)
+            else:
+                req_lines = str(reqs)
+            block = f"אוניברסיטה: {university}\nתחום: {major}\nתנאי קבלה:\n{req_lines}"
+            blocks.append(block)
+        return "\n\n".join(blocks)
+
+    # Fallback: pretty-print or raw
+    return raw
 
 
 def _extract_html(data: bytes) -> str:
