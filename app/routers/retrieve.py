@@ -51,10 +51,11 @@ async def retrieve(req: RetrieveRequest) -> RetrieveResponse:
         )
 
         total_ms = int((time.perf_counter() - t_start) * 1000)
+        rewritten_log = repr(rewritten) if rewritten != req.question else "(unchanged)"
         logger.info(
             f"[retrieve] RESPONSE notebooks={notebook_ids} "
             f"chunks={len(chunks)} total_elapsed={total_ms}ms "
-            f"rewritten={rewritten!r if rewritten != req.question else '(unchanged)'}"
+            f"rewritten={rewritten_log}"
         )
         return RetrieveResponse(
             chunks=[
