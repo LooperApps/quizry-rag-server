@@ -93,3 +93,19 @@ def _build_where(notebook_ids: list[str]) -> dict:
     if len(notebook_ids) == 1:
         return {"notebookId": {"$eq": notebook_ids[0]}}
     return {"$or": [{"notebookId": {"$eq": nid}} for nid in notebook_ids]}
+
+
+def reset_collection() -> int:
+    """
+    Drop and recreate the collection, wiping all documents.
+    Returns the doc count before reset.
+    """
+    client = get_client()
+    try:
+        old_count = get_collection().count()
+    except Exception:
+        old_count = 0
+    client.delete_collection(COLLECTION_NAME)
+    get_collection()  # recreate
+    logger.info(f"[chroma] Collection reset. Deleted {old_count} documents.")
+    return old_count

@@ -56,3 +56,11 @@ async def debug_university() -> dict:
     except Exception as exc:
         logger.error(f"[debug] university test failed: {exc}", exc_info=True)
         return {"error": str(exc)}
+
+
+@router.get("/debug/reset")
+async def debug_reset() -> dict:
+    """Wipe ALL documents from ChromaDB (drops and recreates the collection)."""
+    from app.db.chroma import reset_collection
+    deleted = reset_collection()
+    return {"status": "ok", "deletedDocs": deleted}
