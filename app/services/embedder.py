@@ -5,7 +5,8 @@ Google AI text embedding service with batching and retry.
 import logging
 import threading
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import settings
@@ -14,17 +15,17 @@ logger = logging.getLogger(__name__)
 
 EMBED_BATCH_SIZE = 100
 
-_configured = False
+_client: genai.Client | None = None
 _lock = threading.Lock()
 
 
-def _ensure_configured() -> None:
-    global _configured
-    if not _configured:
+def _get_client() -> genai.Client:
+    global _client
+    if _client is None:
         with _lock:
-            if not _configured:
-                genai.configure(api_key=settings.gemini_api_key)
-                _configured = True
+            if _client is None:
+                _client = genai.Client(api_key=settings.gemini_api_key)
+    return _client
 
 
 @retry(
@@ -34,13 +35,12 @@ def _ensure_configured() -> None:
 )
 def _embed_batch(texts: list[str]) -> list[list[float]]:
     """Embed a single batch of texts (≤ EMBED_BATCH_SIZE)."""
-    _ensure_configured()
-    result = genai.embed_content(
+    result = _get_client().models.embed_content(
         model=settings.embedding_model,
-        content=texts,
-        task_type="retrieval_document",
+        contents=texts,
+        config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
     )
-    return result["embedding"]
+    return [e.values for e in result.embeddings]
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
@@ -66,10 +66,9 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 def embed_query(text: str) -> list[float]:
     """Embed a single query string."""
-    _ensure_configured()
-    result = genai.embed_content(
+    result = _get_client().models.embed_content(
         model=settings.embedding_model,
-        content=text,
-        task_type="retrieval_query",
+        contents=text,
+        config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
     )
-    return result["embedding"]
+    return result.embeddings[0].values
