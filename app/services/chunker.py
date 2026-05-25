@@ -6,12 +6,10 @@ Uses a ThreadPoolExecutor (instead of multiprocessing) for cross-platform
 compatibility and to avoid issues with uvicorn's worker processes.
 """
 
-import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from litellm import completion
-from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import settings
@@ -27,24 +25,6 @@ MAX_CHARS_PER_CALL = 12_000
 
 # Overlap in characters between adjacent sections passed to the LLM
 SECTION_OVERLAP_CHARS = 500
-
-
-# ─── Pydantic schema for structured LLM output ────────────────────────────────
-
-class Chunk(BaseModel):
-    headline: str = Field(
-        description="A brief heading (a few words) most likely to be surfaced in a query"
-    )
-    summary: str = Field(
-        description="2-4 sentences summarising the chunk to answer common questions"
-    )
-    original_text: str = Field(
-        description="The original text of this chunk, exactly as it appears in the document"
-    )
-
-
-class Chunks(BaseModel):
-    chunks: list[Chunk]
 
 
 # ─── Core LLM call ────────────────────────────────────────────────────────────
@@ -67,38 +47,31 @@ def _call_llm_chunk(text: str, source: str, notebook_id: str, source_id: str) ->
         f"Document source: {source}\n"
         f"Target approximately {how_many} chunks (adjust as needed). "
         f"Use ~25% overlap between consecutive chunks so context is preserved across boundaries.\n\n"
-        f"For each chunk provide:\n"
-        f"  headline  – a brief heading (a few words)\n"
-        f"  summary   – 2-4 sentences summarising the chunk\n"
-        f"  original_text – the exact original text (no changes)\n\n"
         f"Together the chunks must cover the ENTIRE text with no gaps.\n\n"
         f"DOCUMENT:\n{text}\n\n"
-        f'Return a JSON object with this exact structure (raw JSON only, no markdown):\n'
-        f'{{"chunks": [{{"headline": "...", "summary": "...", "original_text": "..."}}]}}'
+        f"Return the chunks as plain text. Separate each chunk with exactly:\n"
+        f"<<<CHUNK>>>\n"
+        f"Output nothing else — no numbering, no labels, no markdown."
     )
 
     response = completion(
         model=settings.litellm_model,
         messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
     )
 
-    raw = Chunks.model_validate_json(response.choices[0].message.content)
-    results = []
-    for chunk in raw.chunks:
-        content = f"{chunk.headline}\n\n{chunk.summary}\n\n{chunk.original_text}"
-        results.append(
-            {
-                "content": content,
-                "metadata": {
-                    "notebookId": notebook_id,
-                    "sourceId": source_id,
-                    "source": source,
-                    "headline": chunk.headline,
-                },
-            }
-        )
-    return results
+    raw = response.choices[0].message.content or ""
+    parts = [p.strip() for p in raw.split("<<<CHUNK>>>") if p.strip()]
+    return [
+        {
+            "content": part,
+            "metadata": {
+                "notebookId": notebook_id,
+                "sourceId": source_id,
+                "source": source,
+            },
+        }
+        for part in parts
+    ]
 
 
 # ─── Section splitter ─────────────────────────────────────────────────────────
