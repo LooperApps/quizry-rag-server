@@ -87,20 +87,31 @@ def _extract_json(data: bytes) -> str:
         return raw  # not valid JSON — treat as plain text
 
     logger.info(f"[extractor] _extract_json: type={type(obj).__name__}, "
-                f"len={len(obj) if isinstance(obj, list) else 'n/a'}, "
-                f"first_keys={list(obj[0].keys()) if isinstance(obj, list) and obj and isinstance(obj[0], dict) else 'n/a'}")
+                f"len={len(obj) if isinstance(obj, (list, dict)) else 'n/a'}")
+
+    # Resolve top-level dict: find the first value that is a list of university entries
+    entries = obj
+    if isinstance(obj, dict):
+        for v in obj.values():
+            if isinstance(v, list) and v and isinstance(v[0], dict):
+                entries = v
+                logger.info(f"[extractor] _extract_json: unwrapped dict → list of {len(entries)} items, first_keys={list(v[0].keys())}")
+                break
+        else:
+            logger.warning(f"[extractor] _extract_json: dict has no list value, returning raw. keys={list(obj.keys())}")
+            return raw
 
     # Detect university requirements format: list of {major, university, requirements}
     if (
-        isinstance(obj, list)
-        and obj
-        and isinstance(obj[0], dict)
-        and "major" in obj[0]
-        and "university" in obj[0]
-        and "requirements" in obj[0]
+        isinstance(entries, list)
+        and entries
+        and isinstance(entries[0], dict)
+        and "major" in entries[0]
+        and "university" in entries[0]
+        and "requirements" in entries[0]
     ):
         blocks = []
-        for entry in obj:
+        for entry in entries:
             major = entry.get("major", "").strip()
             university = entry.get("university", "").strip()
             reqs = entry.get("requirements", [])
@@ -113,8 +124,8 @@ def _extract_json(data: bytes) -> str:
         logger.info(f"[extractor] _extract_json: produced {len(blocks)} university blocks")
         return "\n\n".join(blocks)
 
-    # Fallback: pretty-print or raw
-    logger.warning("[extractor] _extract_json: unknown JSON shape, returning raw text")
+    # Fallback: raw
+    logger.warning(f"[extractor] _extract_json: unknown JSON shape, returning raw. first_keys={list(entries[0].keys()) if isinstance(entries, list) and entries and isinstance(entries[0], dict) else 'n/a'}")
     return raw
 
 
