@@ -2,15 +2,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # Required
-    rag_api_key: str  # Shared secret — set in Render dashboard + Firebase Functions config
+    # Required — set in Render dashboard
+    rag_api_key: str      # shared auth secret for /retrieve endpoint
+    deepseek_api_key: str # forwarded to litellm as DEEPSEEK_API_KEY
+    gemini_api_key: str   # forwarded to litellm as GEMINI_API_KEY (embeddings + image OCR)
 
     # ChromaDB storage path (Render persistent disk mount point)
     chroma_path: str = "/data/chroma"
 
     # Model identifiers (litellm model strings)
-    # GEMINI_API_KEY env var is read automatically by litellm for embedding_model
-    # DEEPSEEK_API_KEY env var is read automatically by litellm for litellm_model
     litellm_model: str = "deepseek/deepseek-chat"      # used for query rewriting (smart chunking)
     embedding_model: str = "gemini/gemini-embedding-001" # Google AI embedding model via litellm
 
