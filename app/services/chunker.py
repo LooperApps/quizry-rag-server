@@ -11,6 +11,7 @@ from litellm import completion
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import settings
+from app.log_utils import get_trace_id, log_prompt, log_step
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ def _chunk_default(
     text: str, source: str, notebook_id: str, source_id: str
 ) -> list[dict]:
     """Fast recursive splitter with overlap — no LLM, zero cost."""
+    trace = get_trace_id()
     base_chunks = _recursive_split(text, _SEPARATORS, DEFAULT_CHUNK_SIZE)
     result: list[dict] = []
     for i, chunk in enumerate(base_chunks):
@@ -77,6 +79,11 @@ def _chunk_default(
             "content": content,
             "metadata": {"notebookId": notebook_id, "sourceId": source_id, "source": source},
         })
+    log_step(
+        logger, "CHUNKER_DEFAULT",
+        f"source={source_id} text_len={len(text)} produced={len(result)} chunks "
+        f"chunk_size={DEFAULT_CHUNK_SIZE} overlap={DEFAULT_OVERLAP}",
+    )
     return result
 
 
@@ -92,6 +99,7 @@ def _call_llm_chunk(text: str, source: str, notebook_id: str, source_id: str) ->
     Send one section of text to the LLM and return a list of chunk dicts.
     Retries up to 3 times with exponential back-off for rate-limit / transient errors.
     """
+    trace = get_trace_id()
     how_many = max(1, len(text) // AVERAGE_CHUNK_SIZE)
 
     prompt = (
@@ -107,14 +115,29 @@ def _call_llm_chunk(text: str, source: str, notebook_id: str, source_id: str) ->
         f"Output nothing else — no numbering, no labels, no markdown."
     )
 
+    log_step(
+        logger, "CHUNKER_LLM",
+        f"Calling LLM for chunking source={source_id} "
+        f"text_len={len(text)} target_chunks={how_many} model={settings.litellm_model}",
+    )
+
     response = completion(
         model=settings.litellm_model,
         messages=[{"role": "user", "content": prompt}],
     )
 
     raw = response.choices[0].message.content or ""
+
+    log_prompt(
+        logger, "_call_llm_chunk",
+        prompt=prompt,
+        response=raw,
+        model=settings.litellm_model,
+        source_id=source_id,
+    )
+
     parts = [p.strip() for p in raw.split("<<<CHUNK>>>") if p.strip()]
-    return [
+    result = [
         {
             "content": part,
             "metadata": {
@@ -125,6 +148,11 @@ def _call_llm_chunk(text: str, source: str, notebook_id: str, source_id: str) ->
         }
         for part in parts
     ]
+    log_step(
+        logger, "CHUNKER_LLM",
+        f"Produced {len(result)} chunks from LLM for source={source_id}",
+    )
+    return result
 
 
 # ─── Section splitter ─────────────────────────────────────────────────────────
@@ -175,21 +203,42 @@ def chunk_document(
     Defaults to settings.chunk_mode if not specified.
     Returns a list of dicts: {"content": str, "metadata": dict}
     """
+    trace = get_trace_id()
     effective_mode = mode or settings.chunk_mode
 
+    log_step(
+        logger, "CHUNKER",
+        f"mode={effective_mode} source={source_id} text_len={len(text)} "
+        f"notebook={notebook_id}",
+    )
+
     if effective_mode == "default":
-        logger.info(f"[chunker] default mode for source={source_id}")
-        return _chunk_default(text, source, notebook_id, source_id)
+        result = _chunk_default(text, source, notebook_id, source_id)
+        log_step(
+            logger, "CHUNKER",
+            f"mode=default done — {len(result)} chunks for source={source_id}",
+        )
+        return result
 
     # smart mode — LLM-based
     sections = _split_into_sections(text, MAX_CHARS_PER_CALL, SECTION_OVERLAP_CHARS)
+    log_step(
+        logger, "CHUNKER",
+        f"mode=smart text_len={len(text)} split_into={len(sections)} sections "
+        f"max_chars_per_call={MAX_CHARS_PER_CALL} overlap={SECTION_OVERLAP_CHARS}",
+    )
 
     if len(sections) == 1:
-        return _call_llm_chunk(sections[0], source, notebook_id, source_id)
+        result = _call_llm_chunk(sections[0], source, notebook_id, source_id)
+        log_step(
+            logger, "CHUNKER",
+            f"mode=smart done — {len(result)} chunks for source={source_id}",
+        )
+        return result
 
-    logger.info(
-        f"[chunker] Splitting {len(text):,} chars into {len(sections)} sections "
-        f"for source={source_id}"
+    log_step(
+        logger, "CHUNKER",
+        f"Processing {len(sections)} sections with {settings.chunk_workers} workers",
     )
 
     workers = min(settings.chunk_workers, len(sections))
@@ -213,11 +262,16 @@ def chunk_document(
                 ordered[idx] = future.result()
 
     if errors and all(r is None for r in ordered):
+        log_step(logger, "CHUNKER", f"All {len(sections)} sections FAILED — raising first error")
         raise errors[0]  # All sections failed — surface the first error
 
     for result in ordered:
         if result:
             all_chunks.extend(result)
 
-    logger.info(f"[chunker] Produced {len(all_chunks)} chunks from {len(sections)} sections")
+    log_step(
+        logger, "CHUNKER",
+        f"mode=smart done — {len(all_chunks)} chunks from {len(sections)} sections "
+        f"for source={source_id}, errors={len(errors)}",
+    )
     return all_chunks

@@ -3,7 +3,7 @@ File download and text extraction service.
 
 Supported formats (matching index.js inferMimeType):
   pdf, txt, md, html/htm, csv, docx, pptx
-  png, jpg, jpeg  → OCR via OpenAI Vision (gpt-4o-mini)
+  png, jpg, jpeg  → OCR via Gemini Vision
 """
 
 import io
@@ -13,6 +13,8 @@ from pathlib import Path
 
 import httpx
 
+from app.log_utils import get_trace_id, log_step, log_step_data, log_prompt
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,10 +23,17 @@ async def download_bytes(url: str) -> bytes:
     Download a file from a Firebase Storage download URL.
     The URL is a standard HTTPS URL (alt=media&token=...).
     """
+    trace = get_trace_id()
+    log_step(logger, "DOWNLOAD", f"Downloading from URL (length hidden)")
     async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
         response = await client.get(url)
         response.raise_for_status()
-        return response.content
+        content = response.content
+        log_step(
+            logger, "DOWNLOAD",
+            f"Downloaded {len(content):,} bytes (status={response.status_code})",
+        )
+        return content
 
 
 def extract_text(data: bytes, file_name: str) -> str:
@@ -32,6 +41,7 @@ def extract_text(data: bytes, file_name: str) -> str:
     Extract plain text from a file given its raw bytes and name.
     Returns an empty string for unsupported/binary-only formats.
     """
+    trace = get_trace_id()
     ext = Path(file_name).suffix.lower().lstrip(".")
 
     extractors = {
@@ -52,14 +62,25 @@ def extract_text(data: bytes, file_name: str) -> str:
 
     extractor = extractors.get(ext)
     if extractor is None:
-        logger.warning(f"Unsupported file extension '{ext}' for {file_name}, skipping text extraction")
+        log_step(
+            logger, "EXTRACT",
+            f"Unsupported extension '{ext}' for {file_name} — skipping",
+        )
         return ""
 
     try:
+        log_step(logger, "EXTRACT", f"Extracting text from {file_name} (ext={ext})")
         text = extractor(data)
-        logger.info(f"Extracted {len(text):,} chars from {file_name} ({ext})")
+        log_step(
+            logger, "EXTRACT",
+            f"Extracted {len(text):,} chars from {file_name} ({ext})",
+        )
         return text
     except Exception as e:
+        log_step(
+            logger, "EXTRACT",
+            f"FAILED for {file_name}: {e}",
+        )
         logger.error(f"Text extraction failed for {file_name}: {e}", exc_info=True)
         raise ValueError(f"Could not extract text from {file_name}: {e}") from e
 
@@ -237,6 +258,7 @@ def _extract_image(data: bytes) -> str:
     """
     from litellm import completion
 
+    trace = get_trace_id()
     b64 = base64.b64encode(data).decode()
     # Detect mime type from magic bytes
     if data[:3] == b"\xff\xd8\xff":
@@ -248,6 +270,17 @@ def _extract_image(data: bytes) -> str:
     else:
         mime = "image/jpeg"  # safe fallback
 
+    prompt_text = (
+        "Extract ALL text visible in this image exactly as written. "
+        "Preserve headings, bullet points, tables, and formatting. "
+        "If there is no text, describe the image content in detail instead."
+    )
+
+    log_step(
+        logger, "OCR",
+        f"Calling Gemini OCR mime={mime} data_size={len(data)} bytes",
+    )
+
     response = completion(
         model="gemini/gemini-2.5-flash",
         messages=[
@@ -256,11 +289,7 @@ def _extract_image(data: bytes) -> str:
                 "content": [
                     {
                         "type": "text",
-                        "text": (
-                            "Extract ALL text visible in this image exactly as written. "
-                            "Preserve headings, bullet points, tables, and formatting. "
-                            "If there is no text, describe the image content in detail instead."
-                        ),
+                        "text": prompt_text,
                     },
                     {
                         "type": "image_url",
@@ -272,5 +301,12 @@ def _extract_image(data: bytes) -> str:
         max_tokens=4096,
     )
     text = response.choices[0].message.content or ""
-    logger.info(f"[OCR] Extracted {len(text):,} chars from image")
+
+    log_prompt(
+        logger, "_extract_image (OCR)",
+        prompt=prompt_text + "\n[image: base64 {} {} bytes]".format(mime, len(data)),
+        response=text,
+        model="gemini/gemini-2.5-flash",
+    )
+    log_step(logger, "OCR", f"Extracted {len(text):,} chars from image")
     return text

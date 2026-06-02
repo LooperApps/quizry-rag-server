@@ -6,6 +6,7 @@ import threading
 import chromadb
 
 from app.config import settings
+from app.log_utils import get_trace_id, log_step
 
 logger = logging.getLogger(__name__)
 
@@ -78,13 +79,22 @@ def count_for_notebooks(notebook_ids: list[str]) -> int:
     Return the number of stored chunks for the given notebook IDs.
     Uses collection.get() with include=[] (IDs only) for efficiency.
     """
+    trace = get_trace_id()
     col = get_collection()
     where = _build_where(notebook_ids)
     try:
         result = col.get(where=where, include=[])
-        return len(result["ids"])
+        count = len(result["ids"])
+        log_step(
+            logger, "CHROMA_COUNT",
+            f"notebook_ids={notebook_ids!r} where={where!r} count={count}",
+        )
+        return count
     except Exception as e:
-        logger.warning(f"count_for_notebooks error: {e}")
+        log_step(
+            logger, "CHROMA_COUNT",
+            f"notebook_ids={notebook_ids!r} ERROR: {e}",
+        )
         return 0
 
 

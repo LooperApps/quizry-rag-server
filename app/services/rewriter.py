@@ -12,8 +12,10 @@ from litellm import completion
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import settings
+from app.log_utils import get_trace_id, log_prompt, log_step
 
 logger = logging.getLogger(__name__)
+LINE = "=" * 80
 
 
 @retry(
@@ -29,6 +31,7 @@ def rewrite_query(question: str, history: list[dict] | None = None) -> str:
     representing recent conversation turns (used for context-aware rewrites).
     Returns the rewritten query string.
     """
+    trace = get_trace_id()
     # Include the last 6 turns at most to stay within token limits
     recent = (history or [])[-6:]
     history_text = (
@@ -52,12 +55,28 @@ def rewrite_query(question: str, history: list[dict] | None = None) -> str:
     )
 
     t0 = time.perf_counter()
-    logger.info(f"[rewriter] calling model={settings.litellm_model} question={question!r}")
+    log_step(
+        logger, "REWRITER",
+        f"calling model={settings.litellm_model} question={question!r}",
+    )
+
     response = completion(
         model=settings.litellm_model,
         messages=[{"role": "user", "content": prompt}],
     )
     rewritten = response.choices[0].message.content.strip()
     elapsed = int((time.perf_counter() - t0) * 1000)
-    logger.info(f"[rewriter] done elapsed={elapsed}ms result={rewritten!r}")
+
+    log_prompt(
+        logger, "rewrite_query",
+        prompt=prompt,
+        response=rewritten,
+        model=settings.litellm_model,
+        elapsed_ms=elapsed,
+    )
+
+    log_step(
+        logger, "REWRITER",
+        f"done elapsed={elapsed}ms result={rewritten!r}",
+    )
     return rewritten

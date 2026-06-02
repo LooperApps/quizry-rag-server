@@ -7,10 +7,12 @@ DELETE /ingest/notebooks/{notebookId}/sources/{sourceId} — delete chunks for o
 """
 
 import logging
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.auth import verify_api_key
+from app.log_utils import get_trace_id
 from app.models.ingest import IngestRequest, IngestResponse
 from app.services.ingest_pipeline import (
     _delete_source_chunks,
@@ -20,6 +22,7 @@ from app.services.ingest_pipeline import (
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 logger = logging.getLogger(__name__)
+LINE = "=" * 80
 
 
 @router.post(
@@ -36,8 +39,17 @@ logger = logging.getLogger(__name__)
     ),
 )
 async def ingest(req: IngestRequest) -> IngestResponse:
+    trace = get_trace_id()
+    t_start = time.perf_counter()
     logger.info(
-        f"[ingest] Request notebook={req.notebookId} source={req.sourceId} file={req.fileName}"
+        f"\n{LINE}\n"
+        f"[INGEST-ROUTER] trace={trace} ENTER\n"
+        f"notebook_id={req.notebookId!r}\n"
+        f"source_id={req.sourceId!r}\n"
+        f"file_name={req.fileName!r}\n"
+        f"storage_url={req.storageUrl!r}\n"
+        f"file_type={req.fileType!r}\n"
+        f"{LINE}"
     )
     try:
         chunk_count = await run_ingest(
@@ -46,21 +58,38 @@ async def ingest(req: IngestRequest) -> IngestResponse:
             storage_url=req.storageUrl,
             file_name=req.fileName,
         )
+        elapsed_ms = int((time.perf_counter() - t_start) * 1000)
+        logger.info(
+            f"\n{LINE}\n"
+            f"[INGEST-ROUTER] trace={trace} SUCCESS\n"
+            f"chunks_stored={chunk_count}\n"
+            f"elapsed={elapsed_ms}ms\n"
+            f"{LINE}"
+        )
         return IngestResponse(
             status="ok",
             sourceId=req.sourceId,
             chunkCount=chunk_count,
         )
     except ValueError as exc:
-        # Validation / extraction errors — 422 so Cloud Function treats them as permanent
-        logger.warning(f"[ingest] Validation error for source={req.sourceId}: {exc}")
+        elapsed_ms = int((time.perf_counter() - t_start) * 1000)
+        logger.warning(
+            f"\n{LINE}\n"
+            f"[INGEST-ROUTER] trace={trace} VALIDATION_ERROR elapsed={elapsed_ms}ms\n"
+            f"error={exc}\n"
+            f"{LINE}"
+        )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
     except Exception as exc:
+        elapsed_ms = int((time.perf_counter() - t_start) * 1000)
         logger.error(
-            f"[ingest] Unexpected error for source={req.sourceId}: {exc}",
+            f"\n{LINE}\n"
+            f"[INGEST-ROUTER] trace={trace} FAILED elapsed={elapsed_ms}ms\n"
+            f"error={exc}\n"
+            f"{LINE}",
             exc_info=True,
         )
         raise HTTPException(
@@ -76,8 +105,10 @@ async def ingest(req: IngestRequest) -> IngestResponse:
     description="Called by onNotebookDeleted Cloud Function trigger.",
 )
 async def delete_notebook(notebook_id: str) -> dict:
-    logger.info(f"[ingest] Delete notebook chunks: notebook={notebook_id}")
+    trace = get_trace_id()
+    logger.info(f"[INGEST-ROUTER] trace={trace} DELETE notebook={notebook_id!r}")
     delete_notebook_chunks(notebook_id)
+    logger.info(f"[INGEST-ROUTER] trace={trace} DELETE notebook={notebook_id!r} DONE")
     return {"status": "ok", "notebookId": notebook_id}
 
 
@@ -88,6 +119,13 @@ async def delete_notebook(notebook_id: str) -> dict:
     description="Called when a source document is removed from a notebook.",
 )
 async def delete_source(notebook_id: str, source_id: str) -> dict:
-    logger.info(f"[ingest] Delete source chunks: notebook={notebook_id} source={source_id}")
+    trace = get_trace_id()
+    logger.info(
+        f"[INGEST-ROUTER] trace={trace} DELETE SOURCE "
+        f"notebook={notebook_id!r} source={source_id!r}"
+    )
     _delete_source_chunks(notebook_id, source_id)
+    logger.info(
+        f"[INGEST-ROUTER] trace={trace} DELETE SOURCE notebook={notebook_id!r} source={source_id!r} DONE"
+    )
     return {"status": "ok", "notebookId": notebook_id, "sourceId": source_id}
