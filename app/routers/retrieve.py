@@ -55,6 +55,7 @@ async def retrieve(req: RetrieveRequest) -> RetrieveResponse:
             notebook_ids=notebook_ids,
             question=req.question,
             k=req.k,
+            history=req.history,
         )
 
         total_ms = int((time.perf_counter() - t_start) * 1000)

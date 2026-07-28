@@ -149,16 +149,29 @@ class TestRetriever:
     @patch("app.services.retriever.count_for_notebooks", return_value=5)
     @patch("app.services.retriever.rewrite_query", return_value="rewritten query")
     @patch("app.services.retriever.embed_query", return_value=[0.1] * 1536)
-    @patch("app.services.retriever._query_chroma", return_value=MOCK_CHUNKS)
-    @patch("app.services.retriever._rerank", return_value=MOCK_CHUNKS)
+    @patch("app.services.retriever._query_chroma", return_value=MOCK_CHUNKS * 2)
+    @patch("app.services.retriever._rerank", return_value=MOCK_CHUNKS * 2)
     def test_full_pipeline(self, mock_rerank, mock_query, mock_embed, mock_rewrite, mock_count):
         from app.services.retriever import fetch_context
+        # 4 retrieved chunks > final_k=2 → rerank runs, result trimmed to 2
         chunks, rewritten = fetch_context(["nb1"], "How do plants make food?", k=2)
         assert len(chunks) == 2
         assert rewritten == "rewritten query"
         mock_rewrite.assert_called_once()
-        assert mock_query.call_count == 2  # once for original, once for rewritten
+        mock_query.assert_called_once()  # single query with the rewritten text
         mock_rerank.assert_called_once()
+
+    @patch("app.services.retriever.count_for_notebooks", return_value=5)
+    @patch("app.services.retriever.rewrite_query", return_value="rewritten query")
+    @patch("app.services.retriever.embed_query", return_value=[0.1] * 1536)
+    @patch("app.services.retriever._query_chroma", return_value=MOCK_CHUNKS)
+    @patch("app.services.retriever._rerank", return_value=MOCK_CHUNKS)
+    def test_rerank_skipped_when_result_fits(self, mock_rerank, mock_query, mock_embed, mock_rewrite, mock_count):
+        from app.services.retriever import fetch_context
+        # 2 retrieved chunks <= final_k=5 → rerank is pointless and skipped
+        chunks, _ = fetch_context(["nb1"], "How do plants make food?", k=5)
+        assert len(chunks) == 2
+        mock_rerank.assert_not_called()
 
     @patch("app.services.retriever.count_for_notebooks", return_value=5)
     @patch("app.services.retriever.rewrite_query", side_effect=RuntimeError("LLM error"))
@@ -168,6 +181,6 @@ class TestRetriever:
     def test_rewrite_failure_falls_back(self, mock_rerank, mock_query, mock_embed, mock_rewrite, mock_count):
         from app.services.retriever import fetch_context
         chunks, rewritten = fetch_context(["nb1"], "original question")
-        # Rewrite failed — only one query (original), rewritten == original
+        # Rewrite failed — query runs with the original question
         assert rewritten == "original question"
         assert mock_query.call_count == 1

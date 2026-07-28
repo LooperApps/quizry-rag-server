@@ -142,6 +142,8 @@ class TestExtractor:
         assert "alert" not in result  # script tag removed
 
     def test_unsupported_format_returns_empty(self):
+        # .png is OCR-supported (network call), so use a genuinely
+        # unsupported extension for the "skip" path.
         from app.services.extractor import extract_text
-        result = extract_text(b"\x89PNG\r\n", "image.png")
+        result = extract_text(b"\x00\x01\x02", "archive.zip")
         assert result == ""

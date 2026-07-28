@@ -10,6 +10,10 @@ class RetrieveRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4096)
     k: int = Field(default=10, ge=1, le=20)
 
+    # Optional recent chat turns ({"role": "user"|"assistant", "content": str})
+    # used for context-aware query rewriting of follow-up questions.
+    history: list[dict] | None = None
+
     @model_validator(mode="after")
     def resolve_ids(self) -> "RetrieveRequest":
         if self.notebookIds and self.notebookId:

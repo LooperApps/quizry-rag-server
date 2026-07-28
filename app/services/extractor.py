@@ -102,80 +102,58 @@ def _collect_strings(obj) -> list[str]:
     return []
 
 
+def _university_entries(obj) -> list[dict]:
+    """Collect {major, university, requirements} entries from a list or dict-of-lists."""
+    def is_entry_list(v) -> bool:
+        return (isinstance(v, list) and v and isinstance(v[0], dict)
+                and "major" in v[0] and "university" in v[0] and "requirements" in v[0])
+
+    if is_entry_list(obj):
+        return obj
+    if isinstance(obj, dict):
+        entries: list[dict] = []
+        for v in obj.values():
+            if is_entry_list(v):
+                entries.extend(v)
+        return entries
+    return []
+
+
 def _extract_json(data: bytes) -> str:
     """
-    Extract clean text from any JSON file by collecting all string values recursively.
-    Produces pure text with no JSON syntax noise — works for any schema.
-    Falls back to raw UTF-8 if the file is not valid JSON.
+    Extract clean text from a JSON file.
+
+    University-requirements files ({major, university, requirements} entries)
+    become labelled text blocks separated by double newlines, so the chunker
+    never splits mid-entry and retrieval stays precise. Any other JSON shape
+    falls back to recursively collecting all string values (no syntax noise).
     """
     import json
-    raw = data.decode("utf-8", errors="replace").lstrip("\ufeff")
-    try:
-        obj = json.loads(raw)
-    except json.JSONDecodeError:
-        return raw
-    strings = _collect_strings(obj)
-    logger.info(f"[extractor] _extract_json: collected {len(strings)} string values from JSON")
-    return "\n".join(s for s in strings if s.strip())
-    """
-    Parse JSON and convert to clean readable text.
-    If the JSON is an array of {major, university, requirements} objects
-    (university requirements format), each entry becomes a labelled text block
-    separated by double newlines — so the chunker never splits mid-entry.
-    Falls back to raw UTF-8 text for any other JSON shape.
-    """
-    import json
-    raw = data.decode("utf-8", errors="replace").lstrip("\ufeff")  # strip BOM
+    raw = data.decode("utf-8", errors="replace").lstrip("﻿")
     try:
         obj = json.loads(raw)
     except json.JSONDecodeError:
         logger.warning("[extractor] _extract_json: not valid JSON, returning raw text")
-        return raw  # not valid JSON — treat as plain text
+        return raw
 
-    logger.info(f"[extractor] _extract_json: type={type(obj).__name__}, "
-                f"len={len(obj) if isinstance(obj, (list, dict)) else 'n/a'}")
-
-    # Resolve top-level dict: collect ALL values that are lists of university entries
-    entries = obj
-    if isinstance(obj, dict):
-        all_entries: list = []
-        for v in obj.values():
-            if (isinstance(v, list) and v and isinstance(v[0], dict)
-                    and "major" in v[0] and "university" in v[0] and "requirements" in v[0]):
-                all_entries.extend(v)
-        if all_entries:
-            entries = all_entries
-            logger.info(f"[extractor] _extract_json: merged {len(obj)} dict keys → {len(entries)} total entries")
-        else:
-            logger.warning(f"[extractor] _extract_json: dict has no matching list values, returning raw. keys={list(obj.keys())[:5]}")
-            return raw
-
-    # Detect university requirements format: list of {major, university, requirements}
-    if (
-        isinstance(entries, list)
-        and entries
-        and isinstance(entries[0], dict)
-        and "major" in entries[0]
-        and "university" in entries[0]
-        and "requirements" in entries[0]
-    ):
+    entries = _university_entries(obj)
+    if entries:
         blocks = []
         for entry in entries:
-            major = entry.get("major", "").strip()
-            university = entry.get("university", "").strip()
+            major = str(entry.get("major", "")).strip()
+            university = str(entry.get("university", "")).strip()
             reqs = entry.get("requirements", [])
             if isinstance(reqs, list):
                 req_lines = "\n".join(f"- {r}" for r in reqs if r)
             else:
                 req_lines = str(reqs)
-            block = f"אוניברסיטה: {university}\nתחום: {major}\nתנאי קבלה:\n{req_lines}"
-            blocks.append(block)
+            blocks.append(f"אוניברסיטה: {university}\nתחום: {major}\nתנאי קבלה:\n{req_lines}")
         logger.info(f"[extractor] _extract_json: produced {len(blocks)} university blocks")
         return "\n\n".join(blocks)
 
-    # Fallback: raw
-    logger.warning(f"[extractor] _extract_json: unknown JSON shape, returning raw. first_keys={list(entries[0].keys()) if isinstance(entries, list) and entries and isinstance(entries[0], dict) else 'n/a'}")
-    return raw
+    strings = _collect_strings(obj)
+    logger.info(f"[extractor] _extract_json: collected {len(strings)} string values from JSON")
+    return "\n".join(s for s in strings if s.strip())
 
 
 def _extract_html(data: bytes) -> str:

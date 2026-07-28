@@ -49,7 +49,7 @@ class _RankOrder(BaseModel):
 
 
 @retry(
-    wait=wait_exponential(multiplier=1, min=5, max=60),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
     stop=stop_after_attempt(2),
     reraise=True,
 )
@@ -77,13 +77,16 @@ def _rerank(question: str, chunks: list[ChunkResult]) -> list[ChunkResult]:
     full_prompt = "\n".join([system_prompt] + user_lines)
 
     t0 = time.perf_counter()
+    # Plain json_object mode: DeepSeek does not support json_schema-style
+    # structured outputs, so passing the pydantic model made every call fail
+    # (then retry after a 5s+ backoff) and rerank silently degrade.
     response = completion(
         model=settings.litellm_model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": "\n".join(user_lines)},
         ],
-        response_format=_RankOrder,
+        response_format={"type": "json_object"},
     )
 
     raw_response = response.choices[0].message.content
@@ -253,7 +256,7 @@ def fetch_context(
         log_step(logger, "STEP0_COUNT", f"No documents indexed for notebooks {notebook_ids} — returning empty")
         return [], question
 
-    # Step 1: Query rewrite (translates Arabic → Hebrew to match Hebrew KB content)
+    # Step 1: Query rewrite (multilingual keyword query matching the KB language)
     rewritten = question
     try:
         t1 = time.perf_counter()
@@ -285,17 +288,26 @@ def fetch_context(
         log_step(logger, "STEP3_CHROMA_SEARCH", "No chunks returned from ChromaDB")
         return [], rewritten
 
-    # Step 4: Re-rank via LLM (graceful degradation on failure)
-    try:
-        t4 = time.perf_counter()
-        reranked = _rerank(rewritten, chunks)
+    # Step 4: Re-rank via LLM (graceful degradation on failure).
+    # Skipped when everything retrieved fits in the final result anyway —
+    # the LLM call would only reorder chunks that all get returned.
+    if len(chunks) <= final_k:
         log_step(
             logger, "STEP4_RERANK",
-            f"input={len(chunks)} output={len(reranked)} elapsed={_ms(t4)}ms",
+            f"SKIPPED — retrieved {len(chunks)} <= final_k {final_k}",
         )
-    except Exception as exc:
-        log_step(logger, "STEP4_RERANK", f"FAILED, using ChromaDB ordering: {exc}")
         reranked = chunks
+    else:
+        try:
+            t4 = time.perf_counter()
+            reranked = _rerank(rewritten, chunks)
+            log_step(
+                logger, "STEP4_RERANK",
+                f"input={len(chunks)} output={len(reranked)} elapsed={_ms(t4)}ms",
+            )
+        except Exception as exc:
+            log_step(logger, "STEP4_RERANK", f"FAILED, using ChromaDB ordering: {exc}")
+            reranked = chunks
 
     # Step 5: Trim to final_k
     result = reranked[:final_k]
