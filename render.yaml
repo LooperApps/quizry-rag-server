@@ -28,6 +28,16 @@ services:
       - key: RAG_API_KEY
         sync: false
 
+      # Secret for the /admin routes used by quizry-db-manager. If unset,
+      # RAG_API_KEY is accepted instead — which lets any Cloud Function's
+      # credential delete the index, so set this.
+      - key: ADMIN_API_KEY
+        sync: false
+
+      # Set to "false" to remove the /admin routes entirely.
+      - key: ENABLE_ADMIN
+        value: "true"
+
       # ChromaDB persistent disk mount point
       - key: CHROMA_PATH
         value: /data/chroma

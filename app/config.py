@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     #                "smart"   = LLM-based semantic splitting
     chunk_mode: str = "default"
 
+    # Admin API (consumed by the quizry-db-manager Node server).
+    # admin_api_key falls back to rag_api_key when empty — see app/auth.py.
+    admin_api_key: str = ""
+    enable_admin: bool = True
+
     # Logging
     log_level: str = "INFO"
 

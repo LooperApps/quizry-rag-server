@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.db.chroma import get_collection
 from app.log_utils import get_trace_id, set_trace_id
-from app.routers import health, ingest, retrieve
+from app.routers import admin, health, ingest, retrieve
 
 # Expose API keys so litellm can pick them up automatically from the environment.
 # litellm reads DEEPSEEK_API_KEY and GEMINI_API_KEY by convention.
@@ -50,7 +50,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["POST", "GET", "DELETE"],
+    allow_methods=["POST", "GET", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -114,3 +114,5 @@ async def log_requests(request: Request, call_next):
 app.include_router(health.router)
 app.include_router(ingest.router)
 app.include_router(retrieve.router)
+if settings.enable_admin:
+    app.include_router(admin.router)
