@@ -10,6 +10,14 @@ class Settings(BaseSettings):
     # ChromaDB storage path (Render persistent disk mount point)
     chroma_path: str = "/data/chroma"
 
+    # Multi-app (tenant) routing — see app/apps.py for the full format.
+    # Empty means single-tenant: one app on the `notebook_docs` collection
+    # authenticated with rag_api_key, i.e. exactly the pre-tenant behaviour.
+    #   rag_apps      "quiz_main:notebook_docs,daftar_ai:daftar_notebook_docs"
+    #   rag_app_keys  "daftar_ai:<key>"  (the first app falls back to rag_api_key)
+    rag_apps: str = ""
+    rag_app_keys: str = ""
+
     # Model identifiers (litellm model strings)
     litellm_model: str = "deepseek/deepseek-chat"      # used for query rewriting (smart chunking)
     embedding_model: str = "gemini/gemini-embedding-001" # Google AI embedding model via litellm

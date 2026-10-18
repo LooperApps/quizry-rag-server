@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.apps import all_apps, log_registry
 from app.config import settings
 from app.db.chroma import get_collection
 from app.log_utils import get_trace_id, set_trace_id
@@ -28,9 +29,16 @@ LINE = "=" * 80
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Quizry RAG server...")
-    # Warm up ChromaDB (creates the collection if it doesn't exist)
-    col = get_collection()
-    logger.info(f"ChromaDB initialized — collection has {col.count()} documents")
+    log_registry()
+    # Warm up ChromaDB, creating each app's collection if it does not exist yet.
+    # Doing it here rather than on first request means a brand new app is
+    # queryable (and visibly empty) from boot instead of 404-ing into existence.
+    for rag_app in all_apps():
+        col = get_collection(rag_app.collection)
+        logger.info(
+            f"ChromaDB ready — app={rag_app.id} collection={rag_app.collection} "
+            f"documents={col.count()}"
+        )
     yield
     logger.info("Shutting down Quizry RAG server")
 

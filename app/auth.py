@@ -1,24 +1,38 @@
 import secrets
+
 from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from app.apps import App, app_for_key, get_app
 from app.config import settings
 
 _bearer = HTTPBearer(auto_error=True)
 
 
-def verify_api_key(
+def resolve_app(
     credentials: HTTPAuthorizationCredentials = Security(_bearer),
-) -> None:
+) -> App:
     """
-    Dependency that validates the Bearer token against RAG_API_KEY.
-    Uses constant-time comparison to prevent timing attacks.
+    Authenticate an ingest/retrieve caller and return the app it belongs to.
+
+    The presented key *is* the tenant selector — there is deliberately no way
+    to name a different app in the request body, so one product's credential
+    can never touch another product's collection.
     """
-    if not secrets.compare_digest(credentials.credentials, settings.rag_api_key):
+    app = app_for_key(credentials.credentials)
+    if app is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",
         )
+    return app
+
+
+def verify_api_key(
+    credentials: HTTPAuthorizationCredentials = Security(_bearer),
+) -> None:
+    """Back-compat alias for routes that only need the key checked."""
+    resolve_app(credentials)
 
 
 def verify_admin_key(
@@ -32,6 +46,9 @@ def verify_admin_key(
     accepted instead — an existing deployment keeps working, at the cost of the
     ingest key also granting delete-anything access. Set ADMIN_API_KEY in
     production.
+
+    Unlike resolve_app, this grants access to every app: the manager's whole
+    job is to see across them.
     """
     if not settings.enable_admin:
         raise HTTPException(
@@ -44,3 +61,19 @@ def verify_admin_key(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid admin key",
         )
+
+
+def admin_app(app: str | None = None) -> App:
+    """
+    Resolve the `?app=` query parameter on an admin route.
+
+    Omitted means the default app, so every existing admin call keeps
+    addressing the collection it addressed before tenants existed.
+    """
+    try:
+        return get_app(app)
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown app {app!r}",
+        ) from None

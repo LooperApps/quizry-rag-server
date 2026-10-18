@@ -25,6 +25,7 @@ async def run_ingest(
     source_id: str,
     storage_url: str,
     file_name: str,
+    collection: str | None = None,
 ) -> int:
     """
     Full ingestion pipeline for one source file.
@@ -44,6 +45,7 @@ async def run_ingest(
     logger.info(
         f"\n{LINE}\n"
         f"[INGEST-PIPELINE] trace={trace} START\n"
+        f"collection={collection!r}\n"
         f"notebook_id={notebook_id!r}\n"
         f"source_id={source_id!r}\n"
         f"file_name={file_name!r}\n"
@@ -98,7 +100,7 @@ async def run_ingest(
 
     # 4. Delete existing chunks for this source (supports re-ingest)
     log_step(logger, "STEP4_CLEANUP", f"Deleting old chunks for source={source_id}")
-    _delete_source_chunks(notebook_id, source_id)
+    _delete_source_chunks(notebook_id, source_id, collection)
 
     # 5. Embed (network bound → run in thread pool)
     texts = [c["content"] for c in chunks]
@@ -116,7 +118,7 @@ async def run_ingest(
     )
 
     # 6. Store in ChromaDB
-    collection = get_collection()
+    col = get_collection(collection)
     # IDs include a random suffix to avoid collisions on concurrent re-ingest
     ids = [f"{source_id}_{i}_{uuid.uuid4().hex[:6]}" for i in range(len(chunks))]
     metadatas = [c["metadata"] for c in chunks]
@@ -126,17 +128,18 @@ async def run_ingest(
         f"Adding {len(ids)} chunks to ChromaDB collection",
     )
 
-    collection.add(
+    col.add(
         ids=ids,
         embeddings=embeddings,
         documents=texts,
         metadatas=metadatas,
     )
 
-    total_in_collection = collection.count()
+    total_in_collection = col.count()
     logger.info(
         f"\n{LINE}\n"
         f"[INGEST-PIPELINE] trace={trace} DONE\n"
+        f"collection={col.name}\n"
         f"notebook_id={notebook_id!r}\n"
         f"source_id={source_id!r}\n"
         f"file_name={file_name!r}\n"
@@ -147,13 +150,15 @@ async def run_ingest(
     return len(chunks)
 
 
-def _delete_source_chunks(notebook_id: str, source_id: str) -> None:
+def _delete_source_chunks(
+    notebook_id: str, source_id: str, collection: str | None = None
+) -> None:
     """
     Delete all ChromaDB documents belonging to one specific source.
     Safe to call even if no documents exist yet.
     """
     trace = get_trace_id()
-    collection = get_collection()
+    col = get_collection(collection)
     where_filter = {
         "$and": [
             {"notebookId": {"$eq": notebook_id}},
@@ -162,13 +167,13 @@ def _delete_source_chunks(notebook_id: str, source_id: str) -> None:
     }
     try:
         # Count how many will be deleted
-        matching = collection.get(where=where_filter, include=[])
+        matching = col.get(where=where_filter, include=[])
         count = len(matching["ids"])
         log_step(
             logger, "DELETE_SOURCE",
             f"Deleting {count} chunks for notebook={notebook_id} source={source_id}",
         )
-        collection.delete(where=where_filter)
+        col.delete(where=where_filter)
         log_step(
             logger, "DELETE_SOURCE",
             f"Deleted {count} chunks for source={source_id}",
@@ -181,23 +186,23 @@ def _delete_source_chunks(notebook_id: str, source_id: str) -> None:
         )
 
 
-def delete_notebook_chunks(notebook_id: str) -> None:
+def delete_notebook_chunks(notebook_id: str, collection: str | None = None) -> None:
     """
     Delete ALL ChromaDB documents belonging to a notebook.
     Called when a notebook is deleted in Firestore.
     """
     trace = get_trace_id()
-    collection = get_collection()
+    col = get_collection(collection)
     try:
         where = _build_where([notebook_id])
         # Count how many will be deleted
-        matching = collection.get(where=where, include=[])
+        matching = col.get(where=where, include=[])
         count = len(matching["ids"])
         log_step(
             logger, "DELETE_NOTEBOOK",
             f"Deleting {count} chunks for notebook={notebook_id}",
         )
-        collection.delete(where=where)
+        col.delete(where=where)
         log_step(
             logger, "DELETE_NOTEBOOK",
             f"Deleted {count} chunks for notebook={notebook_id}",

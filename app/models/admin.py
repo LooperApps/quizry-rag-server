@@ -46,3 +46,26 @@ class DeleteResponse(BaseModel):
     notebookId: str | None = None
     sourceId: str | None = None
     detail: str | None = None
+
+
+class MoveNotebooksRequest(BaseModel):
+    """
+    Move notebooks between two apps' collections.
+
+    `targetApp` is the app to move into; the source is the `?app=` the call is
+    addressed to. Both apps' Firestore is outside this server's knowledge, so
+    the caller (quizry-db-manager) supplies the notebook ids it knows belong to
+    the target product.
+    """
+
+    notebookIds: list[str] = Field(min_length=1, max_length=2000)
+    targetApp: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _clean(self) -> "MoveNotebooksRequest":
+        self.notebookIds = list(
+            dict.fromkeys(i.strip() for i in self.notebookIds if i and i.strip())
+        )
+        if not self.notebookIds:
+            raise ValueError("notebookIds must contain at least one non-empty value")
+        return self

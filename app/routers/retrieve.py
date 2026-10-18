@@ -9,7 +9,8 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.auth import verify_api_key
+from app.apps import App
+from app.auth import resolve_app
 from app.log_utils import get_trace_id, log_step, log_step_data
 from app.models.retrieve import ChunkResult, RetrieveRequest, RetrieveResponse
 from app.services.retriever import ChunkResult as ServiceChunk
@@ -23,7 +24,6 @@ LINE = "=" * 80
 @router.post(
     "",
     response_model=RetrieveResponse,
-    dependencies=[Depends(verify_api_key)],
     summary="Retrieve relevant context chunks",
     description=(
         "Performs query rewriting, dual-vector search, deduplication, and LLM re-ranking "
@@ -33,7 +33,10 @@ LINE = "=" * 80
         "- Use `notebookIds` for multi-notebook research feature (`researchPlan` / `researchContent`)."
     ),
 )
-async def retrieve(req: RetrieveRequest) -> RetrieveResponse:
+async def retrieve(
+    req: RetrieveRequest,
+    rag_app: App = Depends(resolve_app),
+) -> RetrieveResponse:
     # req.notebookIds is always populated by the model validator
     notebook_ids: list[str] = req.notebookIds  # type: ignore[assignment]
     t_start = time.perf_counter()
@@ -42,6 +45,7 @@ async def retrieve(req: RetrieveRequest) -> RetrieveResponse:
     logger.info(
         f"\n{LINE}\n"
         f"[RETRIEVE-ROUTER] trace={trace} ENTER\n"
+        f"app={rag_app.id} collection={rag_app.collection}\n"
         f"notebook_ids={notebook_ids!r}\n"
         f"k={req.k}\n"
         f"question={req.question!r}\n"
@@ -56,6 +60,7 @@ async def retrieve(req: RetrieveRequest) -> RetrieveResponse:
             question=req.question,
             k=req.k,
             history=req.history,
+            collection=rag_app.collection,
         )
 
         total_ms = int((time.perf_counter() - t_start) * 1000)

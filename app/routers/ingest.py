@@ -11,7 +11,8 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.auth import verify_api_key
+from app.apps import App
+from app.auth import resolve_app
 from app.log_utils import get_trace_id
 from app.models.ingest import IngestRequest, IngestResponse
 from app.services.ingest_pipeline import (
@@ -29,7 +30,6 @@ LINE = "=" * 80
     "",
     response_model=IngestResponse,
     status_code=status.HTTP_200_OK,
-    dependencies=[Depends(verify_api_key)],
     summary="Ingest a source file into ChromaDB",
     description=(
         "Downloads the file from `storageUrl`, extracts text, chunks it via LLM, "
@@ -38,12 +38,16 @@ LINE = "=" * 80
         "The Cloud Function should set the source status to `ready` on 200, `error` on 5xx."
     ),
 )
-async def ingest(req: IngestRequest) -> IngestResponse:
+async def ingest(
+    req: IngestRequest,
+    rag_app: App = Depends(resolve_app),
+) -> IngestResponse:
     trace = get_trace_id()
     t_start = time.perf_counter()
     logger.info(
         f"\n{LINE}\n"
         f"[INGEST-ROUTER] trace={trace} ENTER\n"
+        f"app={rag_app.id} collection={rag_app.collection}\n"
         f"notebook_id={req.notebookId!r}\n"
         f"source_id={req.sourceId!r}\n"
         f"file_name={req.fileName!r}\n"
@@ -57,6 +61,7 @@ async def ingest(req: IngestRequest) -> IngestResponse:
             source_id=req.sourceId,
             storage_url=req.storageUrl,
             file_name=req.fileName,
+            collection=rag_app.collection,
         )
         elapsed_ms = int((time.perf_counter() - t_start) * 1000)
         logger.info(
@@ -100,31 +105,38 @@ async def ingest(req: IngestRequest) -> IngestResponse:
 
 @router.delete(
     "/notebooks/{notebook_id}",
-    dependencies=[Depends(verify_api_key)],
     summary="Delete all chunks for a notebook",
     description="Called by onNotebookDeleted Cloud Function trigger.",
 )
-async def delete_notebook(notebook_id: str) -> dict:
+async def delete_notebook(
+    notebook_id: str,
+    rag_app: App = Depends(resolve_app),
+) -> dict:
     trace = get_trace_id()
-    logger.info(f"[INGEST-ROUTER] trace={trace} DELETE notebook={notebook_id!r}")
-    delete_notebook_chunks(notebook_id)
+    logger.info(
+        f"[INGEST-ROUTER] trace={trace} DELETE app={rag_app.id} notebook={notebook_id!r}"
+    )
+    delete_notebook_chunks(notebook_id, rag_app.collection)
     logger.info(f"[INGEST-ROUTER] trace={trace} DELETE notebook={notebook_id!r} DONE")
     return {"status": "ok", "notebookId": notebook_id}
 
 
 @router.delete(
     "/notebooks/{notebook_id}/sources/{source_id}",
-    dependencies=[Depends(verify_api_key)],
     summary="Delete chunks for one source file",
     description="Called when a source document is removed from a notebook.",
 )
-async def delete_source(notebook_id: str, source_id: str) -> dict:
+async def delete_source(
+    notebook_id: str,
+    source_id: str,
+    rag_app: App = Depends(resolve_app),
+) -> dict:
     trace = get_trace_id()
     logger.info(
-        f"[INGEST-ROUTER] trace={trace} DELETE SOURCE "
+        f"[INGEST-ROUTER] trace={trace} DELETE SOURCE app={rag_app.id} "
         f"notebook={notebook_id!r} source={source_id!r}"
     )
-    _delete_source_chunks(notebook_id, source_id)
+    _delete_source_chunks(notebook_id, source_id, rag_app.collection)
     logger.info(
         f"[INGEST-ROUTER] trace={trace} DELETE SOURCE notebook={notebook_id!r} source={source_id!r} DONE"
     )

@@ -20,6 +20,13 @@ RAG_API_KEY so an existing deployment keeps working without new config.
     DELETE /admin/chunks                      delete explicit chunk ids
     DELETE /admin/notebooks/{id}              delete a notebook's chunks
     DELETE /admin/notebooks/{id}/sources/{sid}  delete one source's chunks
+    GET    /admin/apps                        the configured apps and their sizes
+    POST   /admin/apps/{id}/reset             wipe one app's collection
+    POST   /admin/move                        move notebooks between two apps
+
+Every route takes an optional `?app=` selecting which product's collection to
+act on; omitting it means the default app, so calls written before tenants
+existed keep addressing the collection they always did.
 """
 
 import logging
@@ -27,14 +34,16 @@ import time
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
-from app.auth import verify_admin_key
+from app.apps import App, all_apps, get_app
+from app.auth import admin_app, verify_admin_key
 from app.config import settings
-from app.db.chroma import _build_where, get_collection
+from app.db.chroma import _build_where, get_collection, reset_collection
 from app.log_utils import get_trace_id, log_step
 from app.models.admin import (
     AdminQueryRequest,
     DeleteChunksRequest,
     DeleteResponse,
+    MoveNotebooksRequest,
 )
 from app.services.admin_index import (
     col_get,
@@ -42,6 +51,7 @@ from app.services.admin_index import (
     embedding_info,
     get_snapshot,
     invalidate_snapshot,
+    move_notebooks,
 )
 
 # The embedder, rewriter and reranker are imported inside the handlers that use
@@ -101,10 +111,14 @@ def _chunk_view(
 # --- Read: stats --------------------------------------------------------------
 
 @router.get("/stats", summary="Collection, disk and embedding statistics")
-async def stats(refresh: bool = Query(False, description="Force a full rescan")) -> dict:
-    col = get_collection()
-    snapshot = get_snapshot(force=refresh)
+async def stats(
+    refresh: bool = Query(False, description="Force a full rescan"),
+    rag_app: App = Depends(admin_app),
+) -> dict:
+    col = get_collection(rag_app.collection)
+    snapshot = get_snapshot(force=refresh, collection=rag_app.collection)
     return {
+        "app": rag_app.id,
         "collection": snapshot["collection"],
         "count": col.count(),
         "totals": snapshot["totals"],
@@ -114,7 +128,7 @@ async def stats(refresh: bool = Query(False, description="Force a full rescan"))
             "cached": snapshot["cached"],
             "ttlSeconds": 60,
         },
-        "embedding": embedding_info(),
+        "embedding": embedding_info(rag_app.collection),
         "disk": disk_usage(),
         "config": {
             "chromaPath": settings.chroma_path,
@@ -133,12 +147,15 @@ async def stats(refresh: bool = Query(False, description="Force a full rescan"))
 async def list_notebooks(
     refresh: bool = Query(False, description="Force a full rescan"),
     includeSources: bool = Query(True, description="Embed the per-source breakdown"),
+    rag_app: App = Depends(admin_app),
 ) -> dict:
-    snapshot = get_snapshot(force=refresh)
+    snapshot = get_snapshot(force=refresh, collection=rag_app.collection)
     notebooks = snapshot["notebooks"]
     if not includeSources:
         notebooks = [{k: v for k, v in nb.items() if k != "sources"} for nb in notebooks]
     return {
+        "app": rag_app.id,
+        "collection": snapshot["collection"],
         "generatedAt": snapshot["generatedAt"],
         "cached": snapshot["cached"],
         "totals": snapshot["totals"],
@@ -150,8 +167,9 @@ async def list_notebooks(
 async def get_notebook(
     notebook_id: str,
     refresh: bool = Query(False),
+    rag_app: App = Depends(admin_app),
 ) -> dict:
-    snapshot = get_snapshot(force=refresh)
+    snapshot = get_snapshot(force=refresh, collection=rag_app.collection)
     for nb in snapshot["notebooks"]:
         if nb["notebookId"] == notebook_id:
             return {"generatedAt": snapshot["generatedAt"], "notebook": nb}
@@ -182,6 +200,7 @@ async def list_chunks(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     full: bool = Query(False, description="Return whole chunk text, not a preview"),
+    rag_app: App = Depends(admin_app),
 ) -> dict:
     where = _where_for(notebookId, sourceId)
     where_document = {"$contains": contains} if contains else None
@@ -193,7 +212,7 @@ async def list_chunks(
         kwargs["where_document"] = where_document
 
     t0 = time.perf_counter()
-    page = col_get(**kwargs)
+    page = col_get(collection=rag_app.collection, **kwargs)
 
     # Chroma cannot count a filtered set without fetching it, so the total is a
     # second ids-only pass. Cheap relative to pulling documents.
@@ -202,7 +221,7 @@ async def list_chunks(
         count_kwargs["where"] = where
     if where_document:
         count_kwargs["where_document"] = where_document
-    matched = len(col_get(**count_kwargs)["ids"])
+    matched = len(col_get(collection=rag_app.collection, **count_kwargs)["ids"])
 
     chunks = [
         _chunk_view(cid, page["documents"][i], page["metadatas"][i], full)
@@ -210,10 +229,11 @@ async def list_chunks(
     ]
     log_step(
         logger, "ADMIN_CHUNKS",
-        f"notebookId={notebookId!r} sourceId={sourceId!r} contains={contains!r} "
+        f"app={rag_app.id} notebookId={notebookId!r} sourceId={sourceId!r} contains={contains!r} "
         f"returned={len(chunks)} matched={matched} elapsed={int((time.perf_counter() - t0) * 1000)}ms",
     )
     return {
+        "app": rag_app.id,
         "total": matched,
         "limit": limit,
         "offset": offset,
@@ -228,9 +248,10 @@ async def list_chunks(
 async def get_chunk(
     chunk_id: str,
     includeEmbedding: bool = Query(False, description="Include the raw vector"),
+    rag_app: App = Depends(admin_app),
 ) -> dict:
     include = ["documents", "metadatas"] + (["embeddings"] if includeEmbedding else [])
-    page = col_get(ids=[chunk_id], include=include)
+    page = col_get(collection=rag_app.collection, ids=[chunk_id], include=include)
     if not page["ids"]:
         raise HTTPException(status_code=404, detail=f"No chunk with id {chunk_id!r}")
     embedding = page["embeddings"][0] if includeEmbedding and page["embeddings"] else None
@@ -247,12 +268,17 @@ async def similar_chunks(
     chunk_id: str,
     k: int = Query(10, ge=1, le=100),
     sameNotebook: bool = Query(True, description="Restrict to the chunk's own notebook"),
+    rag_app: App = Depends(admin_app),
 ) -> dict:
     """
     Uses the chunk's stored vector, so no embedding call is made. Useful for
     spotting near-duplicate chunks produced by the ingest overlap.
     """
-    page = col_get(ids=[chunk_id], include=["documents", "metadatas", "embeddings"])
+    page = col_get(
+        collection=rag_app.collection,
+        ids=[chunk_id],
+        include=["documents", "metadatas", "embeddings"],
+    )
     if not page["ids"]:
         raise HTTPException(status_code=404, detail=f"No chunk with id {chunk_id!r}")
     vector = page["embeddings"][0] if page["embeddings"] else None
@@ -261,7 +287,7 @@ async def similar_chunks(
 
     meta = page["metadatas"][0] or {}
     where = _where_for(meta.get("notebookId") if sameNotebook else None, None)
-    results = _raw_query(vector, where, k + 1)
+    results = _raw_query(vector, where, k + 1, rag_app.collection)
     # The chunk is its own nearest neighbour; drop it and close the rank gap.
     neighbours = [r for r in results if r["id"] != chunk_id][:k]
     for position, row in enumerate(neighbours, 1):
@@ -274,9 +300,11 @@ async def similar_chunks(
 
 # --- Read: query tracing ------------------------------------------------------
 
-def _raw_query(vector: list[float], where: dict | None, k: int) -> list[dict]:
+def _raw_query(
+    vector: list[float], where: dict | None, k: int, collection: str | None = None
+) -> list[dict]:
     """One Chroma similarity search, flattened into ranked rows with distances."""
-    col = get_collection()
+    col = get_collection(collection)
     kwargs: dict = {
         "query_embeddings": [vector],
         "n_results": k,
@@ -305,7 +333,10 @@ def _raw_query(vector: list[float], where: dict | None, k: int) -> list[dict]:
 
 
 @router.post("/query", summary="Run a retrieval and see exactly what comes back")
-async def admin_query(req: AdminQueryRequest = Body(...)) -> dict:
+async def admin_query(
+    req: AdminQueryRequest = Body(...),
+    rag_app: App = Depends(admin_app),
+) -> dict:
     """
     The debugging endpoint the manager's query playground is built on.
 
@@ -365,10 +396,12 @@ async def admin_query(req: AdminQueryRequest = Body(...)) -> dict:
     pool_kwargs: dict = {"include": []}
     if where:
         pool_kwargs["where"] = where
-    pool = len(col_get(**pool_kwargs)["ids"])
+    pool = len(col_get(collection=rag_app.collection, **pool_kwargs)["ids"])
 
     t0 = time.perf_counter()
-    candidates = _raw_query(vector, where, min(req.k, pool)) if pool else []
+    candidates = (
+        _raw_query(vector, where, min(req.k, pool), rag_app.collection) if pool else []
+    )
     stages.append({
         "stage": "search", "ok": True,
         "elapsedMs": int((time.perf_counter() - t0) * 1000),
@@ -429,10 +462,11 @@ async def admin_query(req: AdminQueryRequest = Body(...)) -> dict:
 
     log_step(
         logger, "ADMIN_QUERY",
-        f"trace={trace} notebooks={notebook_ids!r} q={req.question!r} "
+        f"trace={trace} app={rag_app.id} notebooks={notebook_ids!r} q={req.question!r} "
         f"pool={pool} returned={len(final)}",
     )
     return {
+        "app": rag_app.id,
         "question": req.question,
         "effectiveQuery": effective_query,
         "notebookIds": notebook_ids,
@@ -457,13 +491,19 @@ async def admin_query(req: AdminQueryRequest = Body(...)) -> dict:
     ),
 )
 @router.delete("/chunks", response_model=DeleteResponse, summary="Delete chunks by id")
-async def delete_chunks(req: DeleteChunksRequest = Body(...)) -> DeleteResponse:
-    existing = col_get(ids=req.ids, include=[])["ids"]
+async def delete_chunks(
+    req: DeleteChunksRequest = Body(...),
+    rag_app: App = Depends(admin_app),
+) -> DeleteResponse:
+    existing = col_get(collection=rag_app.collection, ids=req.ids, include=[])["ids"]
     if not existing:
         return DeleteResponse(status="ok", deleted=0, detail="No matching chunk ids")
-    get_collection().delete(ids=existing)
-    invalidate_snapshot()
-    log_step(logger, "ADMIN_DELETE_CHUNKS", f"deleted {len(existing)} chunks")
+    get_collection(rag_app.collection).delete(ids=existing)
+    invalidate_snapshot(rag_app.collection)
+    log_step(
+        logger, "ADMIN_DELETE_CHUNKS",
+        f"app={rag_app.id} deleted {len(existing)} chunks",
+    )
     return DeleteResponse(status="ok", deleted=len(existing))
 
 
@@ -472,13 +512,19 @@ async def delete_chunks(req: DeleteChunksRequest = Body(...)) -> DeleteResponse:
     response_model=DeleteResponse,
     summary="Delete every chunk of one notebook",
 )
-async def delete_notebook(notebook_id: str) -> DeleteResponse:
+async def delete_notebook(
+    notebook_id: str,
+    rag_app: App = Depends(admin_app),
+) -> DeleteResponse:
     where = _build_where([notebook_id])
-    count = len(col_get(where=where, include=[])["ids"])
+    count = len(col_get(collection=rag_app.collection, where=where, include=[])["ids"])
     if count:
-        get_collection().delete(where=where)
-        invalidate_snapshot()
-    log_step(logger, "ADMIN_DELETE_NOTEBOOK", f"notebook={notebook_id} deleted={count}")
+        get_collection(rag_app.collection).delete(where=where)
+        invalidate_snapshot(rag_app.collection)
+    log_step(
+        logger, "ADMIN_DELETE_NOTEBOOK",
+        f"app={rag_app.id} notebook={notebook_id} deleted={count}",
+    )
     return DeleteResponse(status="ok", deleted=count, notebookId=notebook_id)
 
 
@@ -487,21 +533,117 @@ async def delete_notebook(notebook_id: str) -> DeleteResponse:
     response_model=DeleteResponse,
     summary="Delete every chunk of one source file",
 )
-async def delete_source(notebook_id: str, source_id: str) -> DeleteResponse:
+async def delete_source(
+    notebook_id: str,
+    source_id: str,
+    rag_app: App = Depends(admin_app),
+) -> DeleteResponse:
     where = {
         "$and": [
             {"notebookId": {"$eq": notebook_id}},
             {"sourceId": {"$eq": source_id}},
         ]
     }
-    count = len(col_get(where=where, include=[])["ids"])
+    count = len(col_get(collection=rag_app.collection, where=where, include=[])["ids"])
     if count:
-        get_collection().delete(where=where)
-        invalidate_snapshot()
+        get_collection(rag_app.collection).delete(where=where)
+        invalidate_snapshot(rag_app.collection)
     log_step(
         logger, "ADMIN_DELETE_SOURCE",
-        f"notebook={notebook_id} source={source_id} deleted={count}",
+        f"app={rag_app.id} notebook={notebook_id} source={source_id} deleted={count}",
     )
     return DeleteResponse(
         status="ok", deleted=count, notebookId=notebook_id, sourceId=source_id,
     )
+
+
+# --- Apps ---------------------------------------------------------------------
+
+@router.get("/apps", summary="The configured apps and the size of each index")
+async def list_apps() -> dict:
+    """
+    What the manager reads on boot to populate its app switcher. Counts come
+    straight from Chroma rather than the snapshot cache so a freshly created
+    collection shows up immediately.
+    """
+    rows = []
+    for app in all_apps():
+        try:
+            count = get_collection(app.collection).count()
+            error = None
+        except Exception as exc:  # a broken collection must not hide the others
+            count, error = None, str(exc)
+        rows.append({
+            "id": app.id,
+            "collection": app.collection,
+            "chunks": count,
+            **({"error": error} if error else {}),
+        })
+    return {"apps": rows, "default": rows[0]["id"] if rows else None}
+
+
+@router.post(
+    "/apps/{app_id}/reset",
+    response_model=DeleteResponse,
+    summary="Drop and recreate one app's collection",
+    description=(
+        "Wipes every chunk for one app. Requires `confirm` to equal the app id, "
+        "so a mistyped or replayed URL cannot empty an index."
+    ),
+)
+async def reset_app(app_id: str, confirm: str = Query(...)) -> DeleteResponse:
+    try:
+        app = get_app(app_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Unknown app {app_id!r}") from None
+    if confirm != app.id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"confirm must equal the app id ({app.id!r}) to reset it",
+        )
+    deleted = reset_collection(app.collection)
+    invalidate_snapshot(app.collection)
+    log_step(logger, "ADMIN_RESET", f"app={app.id} deleted={deleted}")
+    return DeleteResponse(status="ok", deleted=deleted, detail=f"Reset {app.collection}")
+
+
+@router.post(
+    "/move",
+    summary="Move notebooks from one app's collection into another's",
+    description=(
+        "The separation path: both products ingested into one shared collection "
+        "before per-app collections existed. Embeddings are carried across as "
+        "they are, so nothing is re-embedded and nothing is re-billed. The "
+        "source app is the `?app=` this call is addressed to."
+    ),
+)
+async def move(
+    req: MoveNotebooksRequest = Body(...),
+    rag_app: App = Depends(admin_app),
+) -> dict:
+    try:
+        target = get_app(req.targetApp)
+    except KeyError:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown app {req.targetApp!r}"
+        ) from None
+    if target.id == rag_app.id:
+        raise HTTPException(status_code=400, detail="Source and target app are the same")
+
+    t0 = time.perf_counter()
+    try:
+        result = move_notebooks(req.notebookIds, rag_app.collection, target.collection)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_step(
+        logger, "ADMIN_MOVE",
+        f"{rag_app.id} -> {target.id}: moved {result['moved']} chunks "
+        f"across {len(req.notebookIds)} notebooks",
+    )
+    return {
+        "sourceApp": rag_app.id,
+        "targetApp": target.id,
+        "elapsedMs": int((time.perf_counter() - t0) * 1000),
+        **result,
+    }

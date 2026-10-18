@@ -127,15 +127,19 @@ def _query_chroma(
     notebook_ids: list[str],
     query_vector: list[float],
     k: int,
+    collection_name: str | None = None,
 ) -> list[ChunkResult]:
     """
     Query ChromaDB for the top-k chunks matching `query_vector`,
     filtered to the given notebook IDs.
     """
     trace = get_trace_id()
-    collection = get_collection()
+    collection = get_collection(collection_name)
     where = _build_where(notebook_ids)
-    log_step(logger, "CHROMA_QUERY", f"notebook_ids={notebook_ids!r} k={k} where={where!r}")
+    log_step(
+        logger, "CHROMA_QUERY",
+        f"collection={collection.name} notebook_ids={notebook_ids!r} k={k} where={where!r}",
+    )
 
     # Count first to avoid ChromaDB error when n_results > collection size
     matching_ids = collection.get(where=where, include=[])["ids"]
@@ -217,6 +221,7 @@ def fetch_context(
     question: str,
     k: int | None = None,
     history: list[dict] | None = None,
+    collection: str | None = None,
 ) -> tuple[list[ChunkResult], str]:
     """
     Full RAG retrieval pipeline:
@@ -237,6 +242,7 @@ def fetch_context(
     logger.info(
         f"\n{LINE}\n"
         f"[FETCH_CONTEXT] trace={trace} START\n"
+        f"collection={collection!r}\n"
         f"notebook_ids={notebook_ids!r}\n"
         f"question={question!r}\n"
         f"retrieval_k={retrieval_k}\n"
@@ -247,7 +253,7 @@ def fetch_context(
 
     # Step 0: Fast-path — nothing ingested yet for these notebooks
     t0 = time.perf_counter()
-    total = count_for_notebooks(notebook_ids)
+    total = count_for_notebooks(notebook_ids, collection)
     log_step(
         logger, "STEP0_COUNT",
         f"docs_in_index={total} elapsed={_ms(t0)}ms",
@@ -278,7 +284,7 @@ def fetch_context(
 
     # Step 3: ChromaDB similarity search
     t3 = time.perf_counter()
-    chunks = _query_chroma(notebook_ids, vec, retrieval_k)
+    chunks = _query_chroma(notebook_ids, vec, retrieval_k, collection)
     log_step(
         logger, "STEP3_CHROMA_SEARCH",
         f"retrieved={len(chunks)} sources={list({c.source for c in chunks})} elapsed={_ms(t3)}ms",

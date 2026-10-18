@@ -22,9 +22,15 @@ services:
     healthCheckPath: /health
 
     envVars:
-      # Set these in the Render dashboard — never commit real values
-      - key: OPENAI_API_KEY
+      # Set these in the Render dashboard — never commit real values.
+      # Both model keys are REQUIRED: app/config.py declares them without a
+      # default, so the process exits at import time if either is missing.
+      - key: DEEPSEEK_API_KEY
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+
+      # Ingest/retrieve credential for the FIRST app listed in RAG_APPS.
       - key: RAG_API_KEY
         sync: false
 
@@ -34,27 +40,47 @@ services:
       - key: ADMIN_API_KEY
         sync: false
 
+      # ── Apps (tenants) ──────────────────────────────────────────────────
+      # One deployment, one ChromaDB volume, one collection per product.
+      # Notebook IDs are only unique within a product, so a shared collection
+      # would let one app's notebookId filter match the other's chunks.
+      # The first entry is the default app: the one admin routes address when
+      # no ?app= is given, and the one RAG_API_KEY authenticates.
+      #
+      # `notebook_docs` is quiz_main's existing production collection. Do not
+      # rename it — the name is where the data already is.
+      - key: RAG_APPS
+        value: quiz_main:notebook_docs,daftar_ai:daftar_notebook_docs
+
+      # Per-app ingest/retrieve keys as `id:key` pairs, for every app after the
+      # first. Holds secrets, so set it in the dashboard.
+      - key: RAG_APP_KEYS
+        sync: false
+
       # Set to "false" to remove the /admin routes entirely.
       - key: ENABLE_ADMIN
         value: "true"
 
-      # ChromaDB persistent disk mount point
+      # ChromaDB persistent disk mount point (shared by every app's collection)
       - key: CHROMA_PATH
         value: /data/chroma
 
-      # LLM used for chunking and reranking (gpt-4.1-nano is cheap and fast)
+      # LLM used for query rewriting and reranking
       - key: LITELLM_MODEL
-        value: openai/gpt-4.1-nano
+        value: deepseek/deepseek-chat
 
+      # Embedding model. Changing this invalidates every stored vector — the
+      # old and new spaces are not comparable — so a change means re-ingesting
+      # every source, not just a redeploy.
       - key: EMBEDDING_MODEL
-        value: text-embedding-3-large
+        value: gemini/gemini-embedding-001
 
       - key: LOG_LEVEL
         value: INFO
 
-      # Set to true temporarily to debug via /docs
+      # /docs exposes every route and schema; keep it off unless debugging.
       - key: ENABLE_DOCS
-        value: "true"
+        value: "false"
 
       # Disable ChromaDB telemetry (replaces the removed chromadb.config.Settings)
       - key: ANONYMIZED_TELEMETRY

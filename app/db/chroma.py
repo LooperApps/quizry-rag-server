@@ -13,8 +13,16 @@ logger = logging.getLogger(__name__)
 _client: chromadb.PersistentClient | None = None
 _lock = threading.Lock()
 
-# Single collection name — notebooks are isolated by `notebookId` metadata field.
+# Collections are per app (see app/apps.py); within one, notebooks are isolated
+# by the `notebookId` metadata field. This name is the single-tenant default —
+# the collection the server wrote before tenants existed, kept so an
+# unconfigured deployment still finds its data.
 COLLECTION_NAME = "notebook_docs"
+
+# get_or_create_collection is a round trip; the handles are cheap and stable,
+# so keep one per name rather than paying for it on every chunk read.
+_collections: dict[str, chromadb.Collection] = {}
+_collections_lock = threading.Lock()
 
 
 def _resolve_chroma_path() -> str:
@@ -57,43 +65,56 @@ def get_client() -> chromadb.PersistentClient:
     return _client
 
 
-def get_collection() -> chromadb.Collection:
-    """Return the single shared collection, creating it if necessary."""
+def _create_collection(name: str) -> chromadb.Collection:
     # chromadb 1.x supports both the legacy metadata dict and the new
     # configuration API. Try the new API first; fall back to legacy.
     try:
         return get_client().get_or_create_collection(
-            name=COLLECTION_NAME,
+            name=name,
             configuration={"hnsw:space": "cosine"},
         )
     except TypeError:
         # Older chromadb versions use metadata= instead of configuration=
         return get_client().get_or_create_collection(
-            name=COLLECTION_NAME,
+            name=name,
             metadata={"hnsw:space": "cosine"},
         )
 
 
-def count_for_notebooks(notebook_ids: list[str]) -> int:
+def get_collection(name: str | None = None) -> chromadb.Collection:
+    """Return one app's collection, creating it if necessary."""
+    name = name or COLLECTION_NAME
+    cached = _collections.get(name)
+    if cached is not None:
+        return cached
+    with _collections_lock:
+        cached = _collections.get(name)
+        if cached is None:
+            cached = _create_collection(name)
+            _collections[name] = cached
+        return cached
+
+
+def count_for_notebooks(notebook_ids: list[str], collection: str | None = None) -> int:
     """
     Return the number of stored chunks for the given notebook IDs.
     Uses collection.get() with include=[] (IDs only) for efficiency.
     """
     trace = get_trace_id()
-    col = get_collection()
+    col = get_collection(collection)
     where = _build_where(notebook_ids)
     try:
         result = col.get(where=where, include=[])
         count = len(result["ids"])
         log_step(
             logger, "CHROMA_COUNT",
-            f"notebook_ids={notebook_ids!r} where={where!r} count={count}",
+            f"collection={col.name} notebook_ids={notebook_ids!r} where={where!r} count={count}",
         )
         return count
     except Exception as e:
         log_step(
             logger, "CHROMA_COUNT",
-            f"notebook_ids={notebook_ids!r} ERROR: {e}",
+            f"collection={col.name} notebook_ids={notebook_ids!r} ERROR: {e}",
         )
         return 0
 
@@ -105,17 +126,20 @@ def _build_where(notebook_ids: list[str]) -> dict:
     return {"$or": [{"notebookId": {"$eq": nid}} for nid in notebook_ids]}
 
 
-def reset_collection() -> int:
+def reset_collection(collection: str | None = None) -> int:
     """
-    Drop and recreate the collection, wiping all documents.
+    Drop and recreate one app's collection, wiping all its documents.
     Returns the doc count before reset.
     """
+    name = collection or COLLECTION_NAME
     client = get_client()
     try:
-        old_count = get_collection().count()
+        old_count = get_collection(name).count()
     except Exception:
         old_count = 0
-    client.delete_collection(COLLECTION_NAME)
-    get_collection()  # recreate
-    logger.info(f"[chroma] Collection reset. Deleted {old_count} documents.")
+    client.delete_collection(name)
+    with _collections_lock:
+        _collections.pop(name, None)
+    get_collection(name)  # recreate
+    logger.info(f"[chroma] Collection '{name}' reset. Deleted {old_count} documents.")
     return old_count
