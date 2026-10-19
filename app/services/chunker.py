@@ -40,6 +40,10 @@ def _recursive_split(text: str, separators: list[str], chunk_size: int) -> list[
     if len(text) <= chunk_size or not separators:
         return [text]
     sep, rest = separators[0], separators[1:]
+    if sep == "":
+        # Last resort: no separator left (e.g. a PDF whose text extracted
+        # without spaces). str.split("") raises, so cut fixed-size pieces.
+        return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
     parts = text.split(sep)
     chunks: list[str] = []
     current = ""
