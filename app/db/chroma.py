@@ -65,20 +65,45 @@ def get_client() -> chromadb.PersistentClient:
     return _client
 
 
+# Vector size of collections created before EMBEDDING_DIMENSIONS existed:
+# gemini-embedding-001's full output. Those collections carry no
+# `embedding_dimensions` metadata, so this is what an absent value means.
+LEGACY_DIMENSIONS = 3072
+
+
 def _create_collection(name: str) -> chromadb.Collection:
+    # An existing collection is opened as-is, never re-created with new
+    # metadata: its stored vectors fix its dimension, whatever is configured.
+    try:
+        return get_client().get_collection(name=name)
+    except Exception:
+        pass
+    # New collections record the vector size they are built with, so queries
+    # and ingests against them embed at that size (see dimensions_for).
+    meta = {"embedding_dimensions": settings.embedding_dimensions}
     # chromadb 1.x supports both the legacy metadata dict and the new
     # configuration API. Try the new API first; fall back to legacy.
     try:
         return get_client().get_or_create_collection(
             name=name,
             configuration={"hnsw:space": "cosine"},
+            metadata=meta,
         )
     except TypeError:
         # Older chromadb versions use metadata= instead of configuration=
         return get_client().get_or_create_collection(
             name=name,
-            metadata={"hnsw:space": "cosine"},
+            metadata={"hnsw:space": "cosine", **meta},
         )
+
+
+def dimensions_for(name: str | None = None) -> int:
+    """The embedding size a collection's vectors were built with."""
+    meta = get_collection(name).metadata or {}
+    try:
+        return int(meta.get("embedding_dimensions") or LEGACY_DIMENSIONS)
+    except (TypeError, ValueError):
+        return LEGACY_DIMENSIONS
 
 
 def get_collection(name: str | None = None) -> chromadb.Collection:

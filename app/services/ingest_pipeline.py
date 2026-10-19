@@ -10,7 +10,7 @@ import logging
 import uuid
 
 from app.config import settings
-from app.db.chroma import get_collection, _build_where
+from app.db.chroma import get_collection, dimensions_for, _build_where
 from app.log_utils import get_trace_id, log_step, log_step_data
 from app.services.chunker import chunk_document
 from app.services.embedder import embed_texts
@@ -110,7 +110,7 @@ async def run_ingest(
     )
     embeddings: list[list[float]] = await loop.run_in_executor(
         None,
-        lambda: embed_texts(texts),
+        lambda: embed_texts(texts, dimensions_for(collection)),
     )
     log_step(
         logger, "STEP5_EMBED",

@@ -10,6 +10,7 @@ from litellm import embedding as litellm_embedding
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import settings
+from app.db.chroma import LEGACY_DIMENSIONS
 from app.log_utils import get_trace_id, log_step, log_step_data
 
 logger = logging.getLogger(__name__)
@@ -22,16 +23,19 @@ EMBED_BATCH_SIZE = 100
     stop=stop_after_attempt(3),
     reraise=True,
 )
-def _embed_batch(texts: list[str]) -> list[list[float]]:
+def _embed_batch(texts: list[str], dimensions: int | None = None) -> list[list[float]]:
     """Embed a single batch of texts (≤ EMBED_BATCH_SIZE)."""
     response = litellm_embedding(
         model=settings.embedding_model,
         input=texts,
+        # Omitted at the model's full size so legacy collections get exactly
+        # the vectors they were built with.
+        **({"dimensions": dimensions} if dimensions and dimensions != LEGACY_DIMENSIONS else {}),
     )
     return [item["embedding"] for item in response.data]
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
+def embed_texts(texts: list[str], dimensions: int | None = None) -> list[list[float]]:
     """
     Embed a list of texts, batching as needed.
     Returns embeddings in the same order as the input list.
@@ -63,7 +67,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
                 f"[EMBEDDER] trace={trace} batch[{batch_num}] text[{j}] "
                 f"preview={t[:150]!r}"
             )
-        all_embeddings.extend(_embed_batch(batch))
+        all_embeddings.extend(_embed_batch(batch, dimensions))
 
     log_step(
         logger, "EMBEDDER",
@@ -72,7 +76,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     return all_embeddings
 
 
-def embed_query(text: str) -> list[float]:
+def embed_query(text: str, dimensions: int | None = None) -> list[float]:
     """Embed a single query string."""
     trace = get_trace_id()
     t0 = time.perf_counter()
@@ -80,7 +84,7 @@ def embed_query(text: str) -> list[float]:
         logger, "EMBEDDER",
         f"embedding query model={settings.embedding_model} text={text!r}",
     )
-    result = _embed_batch([text])[0]
+    result = _embed_batch([text], dimensions)[0]
     elapsed = int((time.perf_counter() - t0) * 1000)
     log_step(
         logger, "EMBEDDER",

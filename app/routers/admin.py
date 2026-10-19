@@ -30,6 +30,7 @@ existed keep addressing the collection they always did.
 """
 
 import logging
+import re
 import time
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -37,7 +38,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from app.apps import App, all_apps, get_app
 from app.auth import admin_app, verify_admin_key
 from app.config import settings
-from app.db.chroma import _build_where, get_collection, reset_collection
+from app.db.chroma import _build_where, dimensions_for, get_collection, reset_collection
 from app.log_utils import get_trace_id, log_step
 from app.models.admin import (
     AdminQueryRequest,
@@ -378,7 +379,7 @@ async def admin_query(
     t0 = time.perf_counter()
     try:
         from app.services.embedder import embed_query
-        vector = embed_query(effective_query)
+        vector = embed_query(effective_query, dimensions_for(rag_app.collection))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Embedding failed: {exc}") from exc
     stages.append({
@@ -647,3 +648,46 @@ async def move(
         "elapsedMs": int((time.perf_counter() - t0) * 1000),
         **result,
     }
+
+
+# --- Re-embedding -------------------------------------------------------------
+
+@router.post(
+    "/reembed",
+    summary="Re-embed the app's collection into a new collection",
+    description=(
+        "Copies every chunk of the `?app=` collection into `targetCollection`, "
+        "embedding the text again at EMBEDDING_DIMENSIONS. Runs in the "
+        "background; poll GET /admin/reembed. Point RAG_APPS at the target "
+        "once it is done, then run it once more to pick up chunks ingested "
+        "meanwhile (already-copied ids are skipped)."
+    ),
+)
+async def reembed_start(
+    body: dict = Body(...),
+    rag_app: App = Depends(admin_app),
+) -> dict:
+    from app.services import reembed
+
+    target = str(body.get("targetCollection") or "").strip()
+    source = str(body.get("sourceCollection") or rag_app.collection).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{3,63}", target):
+        raise HTTPException(status_code=400, detail="targetCollection must be 3-63 of [A-Za-z0-9_-]")
+    # Never write into a collection another app is serving.
+    for other in all_apps():
+        if other.id != rag_app.id and other.collection in (source, target):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{other.collection!r} belongs to app {other.id!r}",
+            )
+    try:
+        return reembed.start(source, target)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/reembed", summary="Status of the current or last re-embed job")
+async def reembed_status() -> dict:
+    from app.services import reembed
+
+    return {"job": reembed.status()}

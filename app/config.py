@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     # Model identifiers (litellm model strings)
     litellm_model: str = "deepseek/deepseek-chat"      # used for query rewriting (smart chunking)
     embedding_model: str = "gemini/gemini-embedding-001" # Google AI embedding model via litellm
+    # Vector size for NEW collections (gemini-embedding-001 supports 768/1536/3072).
+    # Existing collections keep the size they were built with — see
+    # app/db/chroma.py:dimensions_for. 768 is a quarter of the memory of 3072.
+    embedding_dimensions: int = 768
 
     # Retrieval tuning
     retrieval_k: int = 20   # how many docs to pull per query vector

@@ -75,6 +75,14 @@ services:
       - key: EMBEDDING_MODEL
         value: gemini/gemini-embedding-001
 
+      # Vector size for NEW collections. Existing collections keep the size
+      # they were built with (stored in their metadata; none = 3072), so this
+      # only takes effect for a collection created after it changes — move an
+      # app over with POST /admin/reembed, then point RAG_APPS at the result.
+      # 768 holds ~4x the chunks of 3072 in the same RAM.
+      - key: EMBEDDING_DIMENSIONS
+        value: "768"
+
       - key: LOG_LEVEL
         value: INFO
 

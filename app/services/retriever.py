@@ -16,7 +16,7 @@ from litellm import completion
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from app.db.chroma import get_collection, count_for_notebooks, _build_where
+from app.db.chroma import get_collection, count_for_notebooks, dimensions_for, _build_where
 from app.log_utils import (
     get_trace_id,
     log_chroma_query,
@@ -276,7 +276,7 @@ def fetch_context(
 
     # Step 2: Embed the rewritten query
     t2 = time.perf_counter()
-    vec = embed_query(rewritten)
+    vec = embed_query(rewritten, dimensions_for(collection))
     log_step(
         logger, "STEP2_EMBED",
         f"text={rewritten!r} dims={len(vec)} elapsed={_ms(t2)}ms",
