@@ -22,11 +22,16 @@ RAG_API_KEY so an existing deployment keeps working without new config.
     DELETE /admin/notebooks/{id}/sources/{sid}  delete one source's chunks
     GET    /admin/apps                        the configured apps and their sizes
     POST   /admin/apps/{id}/reset             wipe one app's collection
+    POST   /admin/apps/{id}/promote           swap a staging collection in as live
     POST   /admin/move                        move notebooks between two apps
+    GET    /admin/collections                 every Chroma collection, flags, space, disk
+    DELETE /admin/collections/{name}          drop a collection no app serves
+    POST   /admin/vacuum                      reclaim free pages of chroma.sqlite3
 
 Every route takes an optional `?app=` selecting which product's collection to
 act on; omitting it means the default app, so calls written before tenants
-existed keep addressing the collection they always did.
+existed keep addressing the collection they always did. `?collection=` may
+narrow that to one of the app's `<live>__<suffix>` staging collections.
 """
 
 import logging
@@ -34,11 +39,18 @@ import re
 import time
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from starlette.concurrency import run_in_threadpool
 
 from app.apps import App, all_apps, get_app
 from app.auth import admin_app, verify_admin_key
 from app.config import settings
-from app.db.chroma import _build_where, dimensions_for, get_collection, reset_collection
+from app.db.chroma import (
+    MaintenanceError,
+    _build_where,
+    collection_flags,
+    get_collection,
+    reset_collection,
+)
 from app.log_utils import get_trace_id, log_step
 from app.models.admin import (
     AdminQueryRequest,
@@ -116,8 +128,12 @@ async def stats(
     refresh: bool = Query(False, description="Force a full rescan"),
     rag_app: App = Depends(admin_app),
 ) -> dict:
+    from app.services import vision
+    from app.services.collections_admin import process_memory, versions
+
     col = get_collection(rag_app.collection)
-    snapshot = get_snapshot(force=refresh, collection=rag_app.collection)
+    # A refresh pages through the whole collection: keep it off the event loop.
+    snapshot = await run_in_threadpool(get_snapshot, force=refresh, collection=rag_app.collection)
     return {
         "app": rag_app.id,
         "collection": snapshot["collection"],
@@ -130,7 +146,10 @@ async def stats(
             "ttlSeconds": 60,
         },
         "embedding": embedding_info(rag_app.collection),
-        "disk": disk_usage(),
+        "disk": await run_in_threadpool(disk_usage),
+        "process": process_memory(),
+        "versions": versions(full=True),
+        "vision": vision.usage_totals(),
         "config": {
             "chromaPath": settings.chroma_path,
             "embeddingModel": settings.embedding_model,
@@ -138,6 +157,9 @@ async def stats(
             "chunkMode": settings.chunk_mode,
             "retrievalK": settings.retrieval_k,
             "finalK": settings.final_k,
+            "visionModel": settings.vision_model,
+            "visionMaxPages": settings.vision_max_pages,
+            "visionConcurrency": settings.vision_concurrency,
         },
     }
 
@@ -150,7 +172,7 @@ async def list_notebooks(
     includeSources: bool = Query(True, description="Embed the per-source breakdown"),
     rag_app: App = Depends(admin_app),
 ) -> dict:
-    snapshot = get_snapshot(force=refresh, collection=rag_app.collection)
+    snapshot = await run_in_threadpool(get_snapshot, force=refresh, collection=rag_app.collection)
     notebooks = snapshot["notebooks"]
     if not includeSources:
         notebooks = [{k: v for k, v in nb.items() if k != "sources"} for nb in notebooks]
@@ -170,7 +192,7 @@ async def get_notebook(
     refresh: bool = Query(False),
     rag_app: App = Depends(admin_app),
 ) -> dict:
-    snapshot = get_snapshot(force=refresh, collection=rag_app.collection)
+    snapshot = await run_in_threadpool(get_snapshot, force=refresh, collection=rag_app.collection)
     for nb in snapshot["notebooks"]:
         if nb["notebookId"] == notebook_id:
             return {"generatedAt": snapshot["generatedAt"], "notebook": nb}
@@ -379,7 +401,8 @@ async def admin_query(
     t0 = time.perf_counter()
     try:
         from app.services.embedder import embed_query
-        vector = embed_query(effective_query, dimensions_for(rag_app.collection))
+        flags = collection_flags(rag_app.collection)
+        vector = embed_query(effective_query, flags.dimensions, flags=flags)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Embedding failed: {exc}") from exc
     stages.append({
@@ -609,6 +632,35 @@ async def reset_app(app_id: str, confirm: str = Query(...)) -> DeleteResponse:
 
 
 @router.post(
+    "/apps/{app_id}/promote",
+    summary="Swap a staging collection in as the app's live collection",
+    description=(
+        "Body `{\"staging\": \"<live>__<suffix>\"}`. Renames the live collection to "
+        "`<live>__old_<YYYYMMDDHHMM>` and the staging collection to the live name, so "
+        "RAG_APPS never changes. Refused (409) while a write to either is in flight; "
+        "writes arriving during the swap get 503. The old collection is kept — drop it "
+        "with DELETE /admin/collections/{name} once the new one is verified."
+    ),
+)
+async def promote_app(app_id: str, body: dict = Body(...)) -> dict:
+    from app.services.collections_admin import AdminConflict, AdminNotFound, promote
+
+    try:
+        app = get_app(app_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Unknown app {app_id!r}") from None
+    staging = str(body.get("staging") or "").strip()
+    try:
+        return await run_in_threadpool(promote, app, staging)
+    except AdminNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (AdminConflict, MaintenanceError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
     "/move",
     summary="Move notebooks from one app's collection into another's",
     description=(
@@ -691,3 +743,66 @@ async def reembed_status() -> dict:
     from app.services import reembed
 
     return {"job": reembed.status()}
+
+
+# --- Collections & maintenance ------------------------------------------------
+
+@router.get(
+    "/collections",
+    summary="Every Chroma collection with flags, real space and disk usage",
+    description=(
+        "Lists every collection on the volume — not only the ones RAG_APPS names — "
+        "with count, metadata, stored vector size, the distance space the index "
+        "really uses, behaviour flags, the app it serves (if any), its segment ids "
+        "and the bytes of each segment directory. `orphanSegmentDirs` are HNSW "
+        "directories no collection references any more (left behind by deletes)."
+    ),
+)
+async def list_collections() -> dict:
+    from app.services.collections_admin import collections_report
+
+    return await run_in_threadpool(collections_report)
+
+
+@router.delete(
+    "/collections/{name}",
+    summary="Drop a collection that serves no app",
+    description=(
+        "Requires `confirm` to equal the collection name. Refused (409) for a live "
+        "collection, one with writes in flight, or one a running re-embed job uses. "
+        "Also removes the collection's HNSW directories; run POST /admin/vacuum "
+        "afterwards to reclaim the SQLite space."
+    ),
+)
+async def drop_collection(name: str, confirm: str = Query(...)) -> dict:
+    from app.services.collections_admin import AdminConflict, AdminNotFound, delete_collection_checked
+
+    if confirm != name:
+        raise HTTPException(status_code=400, detail="confirm must equal the collection name")
+    try:
+        return await run_in_threadpool(delete_collection_checked, name)
+    except AdminNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (AdminConflict, MaintenanceError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/vacuum",
+    summary="VACUUM chroma.sqlite3 (reclaim space freed by deletes)",
+    description=(
+        "Runs SQLite VACUUM on the open database (verified safe with the Chroma "
+        "client open). Every Chroma call waits while it runs — minutes on a "
+        "multi-GB file — so use a quiet window. Refused (409) when free disk is "
+        "below 1.2x the database size or a write is in flight. Returns before/after bytes."
+    ),
+)
+async def vacuum_db() -> dict:
+    from app.services.collections_admin import AdminConflict, AdminNotFound, vacuum
+
+    try:
+        return await run_in_threadpool(vacuum)
+    except AdminNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (AdminConflict, MaintenanceError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

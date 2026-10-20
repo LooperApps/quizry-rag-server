@@ -106,7 +106,8 @@ class TestDeleteEndpoints:
         resp = client.delete("/ingest/notebooks/nb123", headers=AUTH)
         assert resp.status_code == 200
         assert resp.json()["notebookId"] == "nb123"
-        mock_delete.assert_called_once_with("nb123")
+        # The router passes the caller's app collection (RAG_API_KEY -> quiz_main).
+        mock_delete.assert_called_once_with("nb123", "notebook_docs_768")
 
     @patch("app.routers.ingest._delete_source_chunks")
     def test_delete_source(self, mock_delete):
@@ -115,7 +116,7 @@ class TestDeleteEndpoints:
         body = resp.json()
         assert body["notebookId"] == "nb123"
         assert body["sourceId"] == "src456"
-        mock_delete.assert_called_once_with("nb123", "src456")
+        mock_delete.assert_called_once_with("nb123", "src456", "notebook_docs_768")
 
 
 # ─── Extractor unit tests ─────────────────────────────────────────────────────

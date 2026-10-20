@@ -2,10 +2,16 @@
 Document chunker with two modes:
   default – fast recursive text splitter (no LLM, zero cost, like OpenAI/Google internals)
   smart   – LLM-based semantic splitting with plain-text delimiter output
+
+plus the page-aware chunker (`chunk_pages`, "pages_v1") used by collections
+that carry `chunker: pages_v1` in their metadata.
 """
 
 import logging
+import math
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 
 from litellm import completion
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -87,6 +93,154 @@ def _chunk_default(
         logger, "CHUNKER_DEFAULT",
         f"source={source_id} text_len={len(text)} produced={len(result)} chunks "
         f"chunk_size={DEFAULT_CHUNK_SIZE} overlap={DEFAULT_OVERLAP}",
+    )
+    return result
+
+
+# ─── Page-aware chunker (pages_v1) ────────────────────────────────────────────
+#
+# Chunks follow pages: a page longer than the target is split into near-equal
+# pieces at the best boundary (paragraph > line > sentence > word) near each
+# ideal cut, short neighbouring pages are packed together up to the target,
+# and every chunk records the page span of its own text. Each chunk after the
+# first starts with up to PAGES_OVERLAP_CHARS of the previous chunk's text,
+# cut at a word boundary, so content is always a contiguous run of the source
+# (pages joined by a blank line). Sizes are in characters.
+
+PAGES_TARGET_CHARS = 1400
+PAGES_OVERLAP_CHARS = 150
+PAGES_MIN_CHARS = 200
+PAGES_MAX_CHARS = 2000
+# How far from the ideal cut a boundary may be, as a share of the target.
+_PAGES_CUT_SLACK = 0.25
+_SENTENCE_END = re.compile(r"[.!?؟۔](?=\s)")
+
+
+@dataclass
+class _Piece:
+    page: int
+    text: str
+    sep: str  # what separated it from the previous piece in the source
+
+
+def _cut_near(text: str, start: int, ideal: int) -> tuple[int, int]:
+    """(end of this piece, start of the next) for a cut close to `ideal`."""
+    slack = int(PAGES_TARGET_CHARS * _PAGES_CUT_SLACK)
+    lo = max(start + PAGES_MIN_CHARS, ideal - slack)
+    hi = min(start + PAGES_TARGET_CHARS, ideal + slack, len(text))
+
+    window = text[lo:hi]
+
+    def nearest(offsets: list[int]) -> int | None:
+        return lo + min(offsets, key=lambda o: abs(lo + o - ideal)) if offsets else None
+
+    for sep in ("\n\n", "\n"):
+        found = nearest([m.start() for m in re.finditer(re.escape(sep), window)])
+        if found is not None:
+            return found, found + len(sep)
+    found = nearest([m.end() for m in _SENTENCE_END.finditer(window)])
+    if found is None:
+        found = nearest([i for i, ch in enumerate(window) if ch == " "])
+    if found is None:
+        return ideal, ideal  # no boundary at all: hard cut, nothing consumed
+    nxt = found
+    while nxt < len(text) and text[nxt].isspace():
+        nxt += 1
+    return found, nxt
+
+
+def _split_page(page: int, text: str, sep: str) -> list[_Piece]:
+    """Split one page's text into near-equal pieces of at most the target size."""
+    pieces: list[_Piece] = []
+    start = 0
+    while len(text) - start > PAGES_TARGET_CHARS:
+        parts_left = math.ceil((len(text) - start) / PAGES_TARGET_CHARS)
+        ideal = start + (len(text) - start) // parts_left
+        end, nxt = _cut_near(text, start, ideal)
+        pieces.append(_Piece(page, text[start:end].rstrip(), sep))
+        gap = text[end:nxt]
+        sep = "\n\n" if "\n\n" in gap else ("\n" if "\n" in gap else (" " if gap else ""))
+        start = nxt
+    pieces.append(_Piece(page, text[start:], sep))
+    return [p for p in pieces if p.text.strip()]
+
+
+def _overlap_tail(text: str) -> str:
+    """The last PAGES_OVERLAP_CHARS of `text`, starting at a word boundary."""
+    if len(text) <= PAGES_OVERLAP_CHARS:
+        return text
+    tail = text[-PAGES_OVERLAP_CHARS:]
+    if text[-PAGES_OVERLAP_CHARS - 1].isspace():
+        return tail.lstrip()
+    for i, ch in enumerate(tail):
+        if ch.isspace():
+            return tail[i:].lstrip()
+    return tail  # one long token: keep it whole
+
+
+def chunk_pages(
+    pages: list[tuple[int, str]],
+    source: str,
+    notebook_id: str,
+    source_id: str,
+) -> list[dict]:
+    """
+    Page-aware chunking (pages_v1). `pages` is [(page number, text)] with text
+    already normalised; empty pages are skipped. Returns
+    [{"content", "metadata": {notebookId, sourceId, source, chunkIndex,
+    pageStart, pageEnd}}] where the page span covers the chunk's own text
+    (not the overlap borrowed from the previous chunk).
+    """
+    pieces: list[_Piece] = []
+    for page, text in pages:
+        text = (text or "").strip()
+        if text:
+            pieces.extend(_split_page(int(page), text, "\n\n" if pieces else ""))
+
+    groups: list[list[_Piece]] = []
+    current: list[_Piece] = []
+    size = 0
+    for piece in pieces:
+        if current:
+            joined = size + len(piece.sep) + len(piece.text)
+            if joined <= PAGES_TARGET_CHARS or size < PAGES_MIN_CHARS:
+                current.append(piece)
+                size = joined
+                continue
+            groups.append(current)
+        current, size = [piece], len(piece.text)
+    if current:
+        if groups and size < PAGES_MIN_CHARS:
+            groups[-1].extend(current)  # a short tail joins the previous chunk
+        else:
+            groups.append(current)
+
+    result: list[dict] = []
+    previous = ""
+    for index, group in enumerate(groups):
+        base = group[0].text + "".join(p.sep + p.text for p in group[1:])
+        content = base
+        if previous:
+            tail = _overlap_tail(previous)
+            if len(tail) + len(group[0].sep) + len(base) <= PAGES_MAX_CHARS:
+                content = tail + (group[0].sep or "") + base
+        result.append({
+            "content": content,
+            "metadata": {
+                "notebookId": notebook_id,
+                "sourceId": source_id,
+                "source": source,
+                "chunkIndex": index,
+                "pageStart": group[0].page,
+                "pageEnd": group[-1].page,
+            },
+        })
+        previous = base
+
+    log_step(
+        logger, "CHUNKER_PAGES",
+        f"source={source_id} pages={len(pages)} produced={len(result)} chunks "
+        f"target={PAGES_TARGET_CHARS} overlap={PAGES_OVERLAP_CHARS}",
     )
     return result
 

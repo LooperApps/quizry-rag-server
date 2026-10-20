@@ -5,7 +5,9 @@ Provides structured, detailed logging with request tracing so every step
 of a request can be correlated in the logs.
 """
 
+import json
 import logging
+import re
 import uuid
 from collections.abc import Callable
 from contextvars import ContextVar
@@ -24,6 +26,50 @@ def set_trace_id(tid: str | None = None) -> str:
     tid = tid or uuid.uuid4().hex[:12]
     _trace_id.set(tid)
     return tid
+
+
+# ─── Redaction ───────────────────────────────────────────────────────────────
+
+# Firebase download URLs carry a bearer-equivalent `token=` query parameter;
+# signed URLs carry signatures. None of it belongs in a log line.
+_SECRET_PARAM = re.compile(
+    r"((?:[?&]|\\u0026)(?:token|access_token|key|sig|signature|x-goog-signature)=)[^&#\"'\s\\]+",
+    re.IGNORECASE,
+)
+_BASE64_FIELD = re.compile(r'("fileBase64"\s*:\s*")([^"]*)(")')
+BODY_LOG_CHARS = 2000
+
+
+def redact_url(url: str) -> str:
+    """The URL with token/signature query values replaced by <redacted>."""
+    return _SECRET_PARAM.sub(r"\1<redacted>", url or "")
+
+
+def redact_body(path: str, body: str, limit: int = BODY_LOG_CHARS) -> str:
+    """
+    A request/response body made safe and short for the log: download tokens
+    redacted, base64 payloads replaced by their length, page text summarised
+    (POST /ingest/text bodies are whole books), and the rest truncated.
+    """
+    if path.rstrip("/").endswith("/ingest/text"):
+        try:
+            data = json.loads(body)
+            pages = data.get("pages") or []
+            return json.dumps({
+                "notebookId": data.get("notebookId"),
+                "sourceId": data.get("sourceId"),
+                "fileName": data.get("fileName"),
+                "collection": data.get("collection"),
+                "pages": len(pages),
+                "chars": sum(len(str(p.get("text") or "")) for p in pages if isinstance(p, dict)),
+            }, ensure_ascii=False)
+        except (ValueError, AttributeError, TypeError):
+            pass
+    body = _BASE64_FIELD.sub(lambda m: f"{m.group(1)}<{len(m.group(2))} base64 chars>{m.group(3)}", body)
+    body = redact_url(body)
+    if len(body) > limit:
+        body = body[:limit] + f"\n... [truncated {len(body) - limit} more chars]"
+    return body
 
 
 # ─── Formatter helpers ───────────────────────────────────────────────────────

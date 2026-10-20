@@ -16,9 +16,9 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from app.db.chroma import dimensions_for, get_collection
+from app.db.chroma import dimensions_for, flags_from_metadata, get_collection
 from app.services.admin_index import invalidate_snapshot
-from app.services.embedder import embed_texts
+from app.services.embedder import embed_documents
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +69,11 @@ def _update(**fields) -> None:
 def _run(source: str, target: str) -> None:
     src = get_collection(source)
     dst = get_collection(target)
-    dims = dimensions_for(target)
-    logger.info(f"[REEMBED] start {source} -> {target} dims={dims} chunks={src.count()}")
+    # A target created now carries the behaviour flags (normalised vectors,
+    # RETRIEVAL_DOCUMENT task type); embed exactly as an ingest into it would.
+    flags = flags_from_metadata(dst.metadata)
+    dims = flags.dimensions
+    logger.info(f"[REEMBED] start {source} -> {target} dims={dims} flags={flags} chunks={src.count()}")
     offset = scanned = embedded = skipped = 0
     try:
         while True:
@@ -87,7 +90,7 @@ def _run(source: str, target: str) -> None:
             skipped += len(ids) - len(keep)
             if keep:
                 texts = [docs[i] for i in keep]
-                vectors = embed_texts(texts, dims)
+                vectors = embed_documents(texts, flags)
                 dst.add(
                     ids=[ids[i] for i in keep],
                     documents=texts,

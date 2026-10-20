@@ -16,7 +16,7 @@ from litellm import completion
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from app.db.chroma import get_collection, count_for_notebooks, dimensions_for, _build_where
+from app.db.chroma import get_collection, collection_flags, count_for_notebooks, _build_where
 from app.log_utils import (
     get_trace_id,
     log_chroma_query,
@@ -24,7 +24,7 @@ from app.log_utils import (
     log_step,
     log_step_data,
 )
-from app.services.embedder import embed_query
+from app.services.embedder import embed_queries, embed_query
 from app.services.rewriter import rewrite_query
 from app.config import settings
 
@@ -38,6 +38,29 @@ class ChunkResult(BaseModel):
     content: str
     source: str    # original file name
     sourceId: str  # Firestore source document ID
+    id: str | None = None          # Chroma chunk id
+    notebookId: str | None = None  # notebook the chunk is stored under
+    pageStart: int | None = None   # page span (pages_v1 collections only)
+    pageEnd: int | None = None
+    distance: float | None = None
+
+
+def _optional_int(value) -> int | None:
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _chunk_from(chunk_id: str | None, doc: str | None, meta: dict | None, distance) -> ChunkResult:
+    meta = meta or {}
+    return ChunkResult(
+        content=doc or "",
+        source=meta.get("source", ""),
+        sourceId=meta.get("sourceId", ""),
+        id=chunk_id,
+        notebookId=meta.get("notebookId") or None,
+        pageStart=_optional_int(meta.get("pageStart")),
+        pageEnd=_optional_int(meta.get("pageEnd")),
+        distance=float(distance) if isinstance(distance, (int, float)) else None,
+    )
 
 
 # ─── Reranker ─────────────────────────────────────────────────────────────────
@@ -128,17 +151,19 @@ def _query_chroma(
     query_vector: list[float],
     k: int,
     collection_name: str | None = None,
+    source_ids: list[str] | None = None,
 ) -> list[ChunkResult]:
     """
     Query ChromaDB for the top-k chunks matching `query_vector`,
-    filtered to the given notebook IDs.
+    filtered to the given notebook IDs (or source IDs).
     """
     trace = get_trace_id()
     collection = get_collection(collection_name)
-    where = _build_where(notebook_ids)
+    where = _build_where(notebook_ids, source_ids)
     log_step(
         logger, "CHROMA_QUERY",
-        f"collection={collection.name} notebook_ids={notebook_ids!r} k={k} where={where!r}",
+        f"collection={collection.name} notebook_ids={notebook_ids!r} source_ids={source_ids!r} "
+        f"k={k} where={where!r}",
     )
 
     # Count first to avoid ChromaDB error when n_results > collection size
@@ -167,18 +192,14 @@ def _query_chroma(
     )
 
     chunks: list[ChunkResult] = []
+    ids = (results.get("ids") or [[]])[0]
     docs = results.get("documents", [[]])[0]
     metas = results.get("metadatas", [[]])[0]
     dists = results.get("distances", [[]])[0]
     for i, (doc, meta) in enumerate(zip(docs, metas)):
         dist = dists[i] if i < len(dists) else "?"
-        chunks.append(
-            ChunkResult(
-                content=doc,
-                source=meta.get("source", ""),
-                sourceId=meta.get("sourceId", ""),
-            )
-        )
+        meta = meta or {}
+        chunks.append(_chunk_from(ids[i] if i < len(ids) else None, doc, meta, dist))
         logger.debug(
             f"[CHROMA_QUERY] trace={trace} result[{i}] "
             f"distance={dist if isinstance(dist, str) else f'{dist:.4f}'} "
@@ -222,10 +243,12 @@ def fetch_context(
     k: int | None = None,
     history: list[dict] | None = None,
     collection: str | None = None,
+    source_ids: list[str] | None = None,
+    rewrite: bool | None = None,
 ) -> tuple[list[ChunkResult], str]:
     """
     Full RAG retrieval pipeline:
-      1. Rewrite query for better recall
+      1. Rewrite query for better recall (skipped when rewrite=False)
       2. Embed the (rewritten) query
       3. ChromaDB similarity search
       4. LLM re-rank
@@ -235,7 +258,8 @@ def fetch_context(
     Gracefully degrades: if rewrite or rerank fails, falls back to simpler step.
     """
     final_k = k or settings.final_k
-    retrieval_k = settings.retrieval_k
+    # Never fewer candidates than the caller asked for (k may exceed RETRIEVAL_K).
+    retrieval_k = max(settings.retrieval_k, final_k)
     t_total = time.perf_counter()
     trace = get_trace_id()
 
@@ -244,6 +268,7 @@ def fetch_context(
         f"[FETCH_CONTEXT] trace={trace} START\n"
         f"collection={collection!r}\n"
         f"notebook_ids={notebook_ids!r}\n"
+        f"source_ids={source_ids!r}\n"
         f"question={question!r}\n"
         f"retrieval_k={retrieval_k}\n"
         f"final_k={final_k}\n"
@@ -253,7 +278,7 @@ def fetch_context(
 
     # Step 0: Fast-path — nothing ingested yet for these notebooks
     t0 = time.perf_counter()
-    total = count_for_notebooks(notebook_ids, collection)
+    total = count_for_notebooks(notebook_ids, collection, source_ids)
     log_step(
         logger, "STEP0_COUNT",
         f"docs_in_index={total} elapsed={_ms(t0)}ms",
@@ -264,19 +289,24 @@ def fetch_context(
 
     # Step 1: Query rewrite (multilingual keyword query matching the KB language)
     rewritten = question
-    try:
-        t1 = time.perf_counter()
-        rewritten = rewrite_query(question, history)
-        log_step(
-            logger, "STEP1_REWRITE",
-            f"original={question!r} rewritten={rewritten!r} elapsed={_ms(t1)}ms",
-        )
-    except Exception as exc:
-        log_step(logger, "STEP1_REWRITE", f"FAILED, using original: {exc}")
+    if rewrite is False:
+        log_step(logger, "STEP1_REWRITE", "SKIPPED — rewrite=false")
+    else:
+        try:
+            t1 = time.perf_counter()
+            rewritten = rewrite_query(question, history)
+            log_step(
+                logger, "STEP1_REWRITE",
+                f"original={question!r} rewritten={rewritten!r} elapsed={_ms(t1)}ms",
+            )
+        except Exception as exc:
+            log_step(logger, "STEP1_REWRITE", f"FAILED, using original: {exc}")
 
-    # Step 2: Embed the rewritten query
+    # Step 2: Embed the rewritten query (normalised / RETRIEVAL_QUERY only for
+    # collections whose flags ask for it)
     t2 = time.perf_counter()
-    vec = embed_query(rewritten, dimensions_for(collection))
+    flags = collection_flags(collection)
+    vec = embed_query(rewritten, flags.dimensions, flags=flags)
     log_step(
         logger, "STEP2_EMBED",
         f"text={rewritten!r} dims={len(vec)} elapsed={_ms(t2)}ms",
@@ -284,7 +314,7 @@ def fetch_context(
 
     # Step 3: ChromaDB similarity search
     t3 = time.perf_counter()
-    chunks = _query_chroma(notebook_ids, vec, retrieval_k, collection)
+    chunks = _query_chroma(notebook_ids, vec, retrieval_k, collection, source_ids)
     log_step(
         logger, "STEP3_CHROMA_SEARCH",
         f"retrieved={len(chunks)} sources={list({c.source for c in chunks})} elapsed={_ms(t3)}ms",
@@ -339,6 +369,95 @@ def fetch_context(
     )
 
     return result, rewritten
+
+
+def merge_round_robin(per_query: list[list[ChunkResult]], k: int) -> list[ChunkResult]:
+    """
+    Interleave several ranked lists (rank 1 of every query, then rank 2, ...),
+    dropping repeats of a chunk id but keeping its best (lowest) distance.
+    """
+    best: dict[str, ChunkResult] = {}
+    order: list[str] = []
+    depth = max((len(r) for r in per_query), default=0)
+    for rank in range(depth):
+        for results in per_query:
+            if rank >= len(results):
+                continue
+            chunk = results[rank]
+            key = chunk.id or chunk.content
+            seen = best.get(key)
+            if seen is None:
+                best[key] = chunk
+                order.append(key)
+            elif chunk.distance is not None and (seen.distance is None or chunk.distance < seen.distance):
+                seen.distance = chunk.distance
+    return [best[key] for key in order[:k]]
+
+
+def fetch_multi(
+    notebook_ids: list[str],
+    queries: list[str],
+    k: int,
+    collection: str | None = None,
+    source_ids: list[str] | None = None,
+) -> list[ChunkResult]:
+    """
+    Multi-query retrieval: embed every query in one batch, run one Chroma query
+    with all the vectors, merge the per-query rankings round-robin and dedupe.
+    No rewrite and no rerank — the caller already chose the queries (topics).
+    """
+    t_total = time.perf_counter()
+    trace = get_trace_id()
+    total = count_for_notebooks(notebook_ids, collection, source_ids)
+    log_step(
+        logger, "MULTI_QUERY",
+        f"trace={trace} collection={collection!r} notebook_ids={notebook_ids!r} "
+        f"source_ids={source_ids!r} queries={len(queries)} k={k} docs_in_index={total}",
+    )
+    if total == 0:
+        return []
+
+    flags = collection_flags(collection)
+    t0 = time.perf_counter()
+    vectors = embed_queries(queries, flags)
+    embed_ms = _ms(t0)
+
+    col = get_collection(collection)
+    where = _build_where(notebook_ids, source_ids)
+    t1 = time.perf_counter()
+    raw = col.query(
+        query_embeddings=vectors,
+        n_results=min(k, total),
+        where=where,
+        include=["documents", "metadatas", "distances"],
+    )
+    ids_per = raw.get("ids") or []
+    docs_per = raw.get("documents") or []
+    metas_per = raw.get("metadatas") or []
+    dists_per = raw.get("distances") or []
+    per_query: list[list[ChunkResult]] = []
+    for qi in range(len(queries)):
+        ids = ids_per[qi] if qi < len(ids_per) else []
+        docs = docs_per[qi] if qi < len(docs_per) else []
+        metas = metas_per[qi] if qi < len(metas_per) else []
+        dists = dists_per[qi] if qi < len(dists_per) else []
+        per_query.append([
+            _chunk_from(
+                cid,
+                docs[i] if i < len(docs) else "",
+                metas[i] if i < len(metas) else {},
+                dists[i] if i < len(dists) else None,
+            )
+            for i, cid in enumerate(ids)
+        ])
+    result = merge_round_robin(per_query, k)
+    log_step(
+        logger, "MULTI_QUERY",
+        f"trace={trace} returned={len(result)} candidates={sum(len(r) for r in per_query)} "
+        f"embed={embed_ms}ms search={_ms(t1)}ms total={_ms(t_total)}ms "
+        f"sources={sorted({c.sourceId for c in result})}",
+    )
+    return result
 
 
 def _ms(t: float) -> int:

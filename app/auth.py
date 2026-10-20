@@ -1,9 +1,10 @@
 import secrets
+from dataclasses import replace
 
 from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.apps import App, app_for_key, get_app
+from app.apps import App, CollectionAccessError, app_for_key, get_app, resolve_collection
 from app.config import settings
 
 _bearer = HTTPBearer(auto_error=True)
@@ -63,17 +64,32 @@ def verify_admin_key(
         )
 
 
-def admin_app(app: str | None = None) -> App:
+def admin_app(app: str | None = None, collection: str | None = None) -> App:
     """
     Resolve the `?app=` query parameter on an admin route.
 
     Omitted means the default app, so every existing admin call keeps
     addressing the collection it addressed before tenants existed.
+
+    `?collection=` points the route at one of that app's existing
+    `<live>__<suffix>` staging (or kept old) collections instead of the live
+    one, e.g. to inspect a rebuild before promoting it.
     """
     try:
-        return get_app(app)
+        rag_app = get_app(app)
     except KeyError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Unknown app {app!r}",
         ) from None
+    if not collection or collection == rag_app.collection:
+        return rag_app
+    from app.db.chroma import collection_exists
+
+    try:
+        name = resolve_collection(rag_app, collection)
+    except CollectionAccessError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+    if not collection_exists(name):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No collection {name!r}")
+    return replace(rag_app, collection=name)

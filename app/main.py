@@ -9,8 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.apps import all_apps, log_registry
 from app.config import settings
 from app.db.chroma import get_collection
-from app.log_utils import get_trace_id, set_trace_id
-from app.routers import admin, health, ingest, retrieve
+from app.log_utils import get_trace_id, redact_body, set_trace_id
+from app.routers import admin, extract, health, ingest, retrieve
 
 # Expose API keys so litellm can pick them up automatically from the environment.
 # litellm reads DEEPSEEK_API_KEY and GEMINI_API_KEY by convention.
@@ -70,16 +70,13 @@ async def log_requests(request: Request, call_next):
     trace_id = set_trace_id()
     t_start = time.perf_counter()
 
-    # Read and log the request body
-    body_bytes = await request.body()
-    body_str = body_bytes.decode("utf-8", errors="replace")
-    # Truncate excessively large bodies (e.g. base64 images in ingest)
-    body_log = body_str[:5000] if len(body_str) > 5000 else body_str
-    if len(body_str) > 5000:
-        body_log += f"\n... [truncated {len(body_str) - 5000} more bytes]"
-
     method = request.method
     path = request.url.path
+
+    # Read and log the request body — redacted (download tokens, base64
+    # payloads, whole-book page text) and truncated.
+    body_bytes = await request.body()
+    body_log = redact_body(path, body_bytes.decode("utf-8", errors="replace"))
     qs = request.url.query
     full_path = f"{path}?{qs}" if qs else path
 
@@ -103,9 +100,7 @@ async def log_requests(request: Request, call_next):
     except Exception:
         resp_body = "<unreadable>"
 
-    resp_log = resp_body[:5000] if len(resp_body) > 5000 else resp_body
-    if len(resp_body) > 5000:
-        resp_log += f"\n... [truncated {len(resp_body) - 5000} more bytes]"
+    resp_log = redact_body("", resp_body)
 
     elapsed_ms = int((time.perf_counter() - t_start) * 1000)
     logger.info(
@@ -122,5 +117,6 @@ async def log_requests(request: Request, call_next):
 app.include_router(health.router)
 app.include_router(ingest.router)
 app.include_router(retrieve.router)
+app.include_router(extract.router)
 if settings.enable_admin:
     app.include_router(admin.router)

@@ -5,10 +5,16 @@ pydantic>=2.7
 pydantic-settings>=2.4
 
 # Vector store
+# chromadb and litellm are deliberately left unpinned: the versions Render has
+# installed are unknown (GET /health reports them), and pinning blind could
+# downgrade the on-disk Chroma format. Pin them to what /health shows before
+# the next dependency change. Code here relies on chromadb>=1.0's
+# `configuration={"hnsw": {...}}` and falls back to the legacy metadata form.
 chromadb>=0.6
 
 # LLM + embeddings
-# GEMINI_API_KEY env var used by litellm for embeddings; DEEPSEEK_API_KEY for rewriting
+# GEMINI_API_KEY env var used by litellm for embeddings; DEEPSEEK_API_KEY for
+# rewriting/reranking (litellm) and vision (direct HTTP, app/services/vision.py)
 litellm>=1.50
 
 # Text extraction
@@ -17,6 +23,11 @@ pdfminer.six>=20231228
 python-docx>=1.1
 python-pptx>=1.0
 beautifulsoup4>=4.12
+
+# PDF page rendering + image-object detection for DeepSeek vision (Apache-2.0;
+# PyMuPDF is AGPL), and image conversion/downscaling before upload
+pypdfium2>=4.30
+pillow>=10.4
 
 # HTTP client (download from Firebase Storage)
 httpx>=0.27

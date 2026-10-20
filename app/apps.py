@@ -26,6 +26,7 @@ falls back to RAG_API_KEY, so an existing deployment needs no new secret.
 """
 
 import logging
+import re
 import secrets
 from dataclasses import dataclass
 
@@ -148,6 +149,57 @@ def app_for_key(token: str) -> App | None:
 
 def collection_for(app_id: str | None) -> str:
     return get_app(app_id).collection
+
+
+# Chroma's own rule for names, narrowed to the characters this server uses.
+_COLLECTION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{1,61}[A-Za-z0-9]")
+STAGING_SEPARATOR = "__"
+
+
+class CollectionAccessError(ValueError):
+    """A request named a collection its app may not use."""
+
+
+def app_serving(collection: str) -> str | None:
+    """The id of the app whose live collection this is, if any."""
+    for app in APPS.values():
+        if app.collection == collection:
+            return app.id
+    return None
+
+
+def staging_owner(collection: str) -> str | None:
+    """The app a `<live>__<suffix>` staging/old collection belongs to, if any."""
+    for app in APPS.values():
+        if collection.startswith(app.collection + STAGING_SEPARATOR):
+            return app.id
+    return None
+
+
+def resolve_collection(app: App, requested: str | None) -> str:
+    """
+    The collection a request may address: the app's live collection, or one
+    of its own staging collections — `<live>__<suffix>`, e.g.
+    daftar_notebook_docs_768__next — which promotion swaps in later. A key can
+    never reach another app's collections this way.
+    """
+    if not requested or requested == app.collection:
+        return app.collection
+    if not _COLLECTION_NAME.fullmatch(requested):
+        raise CollectionAccessError(f"Invalid collection name {requested!r}")
+    if not requested.startswith(app.collection + STAGING_SEPARATOR):
+        raise CollectionAccessError(
+            f"Collection {requested!r} is not {app.collection!r} or one of its "
+            f"'{app.collection}{STAGING_SEPARATOR}*' staging collections"
+        )
+    # Even with overlapping names (live "x" vs another app's "x__y"), a name in
+    # another app's live/staging namespace is never this app's.
+    for other in APPS.values():
+        if other.id != app.id and (
+            requested == other.collection or requested.startswith(other.collection + STAGING_SEPARATOR)
+        ):
+            raise CollectionAccessError(f"Collection {requested!r} belongs to app {other.id!r}")
+    return requested
 
 
 def log_registry() -> None:

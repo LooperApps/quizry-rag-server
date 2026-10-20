@@ -309,14 +309,26 @@ def disk_usage() -> dict:
 
 
 def embedding_info(collection: str | None = None) -> dict:
-    """Report the vector dimension actually stored, not the one configured."""
+    """
+    Report the vector dimension actually stored, not the one configured, and
+    the distance space the index really uses (read from the collection's
+    configuration — collections created before the cosine fix are L2).
+    """
+    from app.db.chroma import collection_space, flags_from_metadata
+
     try:
         page = col_get(collection=collection, limit=1, include=["embeddings"])
         vec = page["embeddings"][0] if page["embeddings"] else None
+        col = get_collection(collection)
+        flags = flags_from_metadata(col.metadata)
         return {
             "model": settings.embedding_model,
             "dimensions": len(vec) if vec else None,
-            "space": "cosine",
+            "space": collection_space(col),
+            "normalized": flags.normalized,
+            "taskTypes": flags.task_types,
+            "chunker": flags.chunker,
+            "pdfVision": flags.pdf_vision,
         }
     except Exception as exc:  # diagnostic path - never fail the stats call
         return {"model": settings.embedding_model, "dimensions": None, "error": str(exc)}
@@ -345,10 +357,14 @@ def move_notebooks(
     if not notebook_ids:
         return {"moved": 0, "notebooks": {}}
 
-    from app.db.chroma import _build_where, get_collection
+    from app.db.chroma import _build_where, flags_from_metadata, get_collection
 
     src = get_collection(source_collection)
     dst = get_collection(target_collection)
+    # A flagged target stores unit vectors; legacy vectors are scaled on the way.
+    normalize = flags_from_metadata(dst.metadata).normalized
+    if normalize:
+        from app.services.embedder import l2_normalize
     moved_per_notebook: dict[str, int] = {}
     total = 0
 
@@ -369,7 +385,7 @@ def move_notebooks(
                 ids=ids,
                 documents=page["documents"],
                 metadatas=page["metadatas"],
-                embeddings=page["embeddings"],
+                embeddings=l2_normalize(page["embeddings"]) if normalize else page["embeddings"],
             )
             src.delete(ids=ids)
             moved += len(ids)

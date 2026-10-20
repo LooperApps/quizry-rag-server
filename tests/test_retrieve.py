@@ -92,7 +92,7 @@ class TestRetrieveEndpoint:
         )
         assert resp.status_code == 500
 
-    def test_k_clamped_to_max_20(self):
+    def test_k_clamped_to_max_40(self):
         resp = client.post(
             "/retrieve",
             headers=AUTH,
@@ -126,7 +126,9 @@ class TestHealthEndpoint:
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "ok"
-        assert body["totalDocs"] == 100
+        # conftest configures two apps; each mocked collection reports 100.
+        assert body["totalDocs"] == 100 * len(body["apps"])
+        assert set(body["versions"]) >= {"chromadb", "litellm", "python"}
 
     def test_health_chromadb_error_returns_degraded(self):
         with patch("app.routers.health.get_collection") as mock_col:

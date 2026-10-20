@@ -47,10 +47,12 @@ services:
       # The first entry is the default app: the one admin routes address when
       # no ?app= is given, and the one RAG_API_KEY authenticates.
       #
-      # `notebook_docs` is quiz_main's existing production collection. Do not
-      # rename it — the name is where the data already is.
+      # These are the live 768-dim collections (matches the dashboard and GET
+      # /health). Do not rename them — the name is where the data is. A
+      # rebuild goes into `<name>__next` and POST /admin/apps/{id}/promote
+      # swaps it in under the SAME name, so this value never changes.
       - key: RAG_APPS
-        value: quiz_main:notebook_docs,daftar_ai:daftar_notebook_docs
+        value: quiz_main:notebook_docs_768,daftar_ai:daftar_notebook_docs_768
 
       # Per-app ingest/retrieve keys as `id:key` pairs, for every app after the
       # first. Holds secrets, so set it in the dashboard.
@@ -82,6 +84,17 @@ services:
       # 768 holds ~4x the chunks of 3072 in the same RAM.
       - key: EMBEDDING_DIMENSIONS
         value: "768"
+
+      # DeepSeek vision (image OCR for every app; scanned/junk-font PDF pages
+      # and figure descriptions for flagged collections and POST /extract).
+      # Uses DEEPSEEK_API_KEY over plain HTTP. Every value has a working default
+      # in app/config.py, so none of these has to be set; listed for tuning:
+      #   DEEPSEEK_API_BASE   https://api.deepseek.com
+      #   VISION_MODEL        deepseek-flash   (thinking is always disabled)
+      #   VISION_MAX_TOKENS   3000             output tokens per page/image
+      #   VISION_MAX_PAGES    60               DeepSeek calls per PDF
+      #   VISION_CONCURRENCY  4                concurrent calls, process-wide
+      #   VISION_TIMEOUT_S    120              per call (4 attempts on 429/5xx)
 
       - key: LOG_LEVEL
         value: INFO
