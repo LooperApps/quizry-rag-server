@@ -35,7 +35,10 @@ from app.db.chroma import (
     list_collection_names,
     maintenance,
     segments_by_collection,
+    space_from_info,
     sqlite_path,
+    stored_collection_info,
+    stored_counts,
     stored_dimensions,
     swap_in_collection,
     writes_in_flight,
@@ -132,19 +135,20 @@ def collections_report() -> dict:
     base = chroma_dir()
     segments = segments_by_collection()
     dims = stored_dimensions()
-    client = get_client()
+    # Everything comes from chroma.sqlite3: opening a collection and counting it
+    # loads its HNSW index into RAM, and a large unused collection (the old
+    # 3072-dim ones) is enough to run a 2 GB instance out of memory.
+    counts = stored_counts()
+    infos = stored_collection_info()
 
     rows = []
-    for name in list_collection_names():
-        try:
-            col = client.get_collection(name=name)
-            meta = dict(col.metadata or {})
-            count = col.count()
-            space = collection_space(col)
-            col_id = str(col.id)
-            error = None
-        except Exception as exc:  # one broken collection must not hide the rest
-            meta, count, space, col_id, error = {}, None, None, None, str(exc)
+    for name in sorted(infos):
+        info = infos[name]
+        meta = dict(info.get("metadata") or {})
+        count = counts.get(name)
+        space = space_from_info(info)
+        col_id = str(info.get("id"))
+        error = None
         flags = flags_from_metadata(meta)
         segs = []
         disk = 0
@@ -247,8 +251,7 @@ def delete_collection_checked(name: str) -> dict:
     with maintenance(f"delete of {name}") as in_flight:
         if in_flight.get(name):
             raise AdminConflict(f"{in_flight[name]} write(s) to {name!r} in flight")
-        col = get_client().get_collection(name=name)
-        count = col.count()
+        count = stored_counts().get(name)  # never load the HNSW index just to drop it
         delete_collection(name)
 
     base = chroma_dir()

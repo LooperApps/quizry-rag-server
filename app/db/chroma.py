@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sqlite3
@@ -284,6 +285,58 @@ def segments_by_collection() -> dict[str, list[dict]]:
 def stored_dimensions() -> dict[str, int | None]:
     """{collection name: vector size Chroma recorded (None until the first add)}."""
     return {name: dim for name, dim in _read_sqlite("SELECT name, dimension FROM collections")}
+
+
+def stored_counts() -> dict[str, int]:
+    """
+    {collection name: stored record count}, from chroma.sqlite3. Unlike
+    Collection.count() this never loads a collection's HNSW index into memory,
+    so an inventory of a large unused collection cannot run the server out of RAM.
+    """
+    counts = {name: 0 for name, in _read_sqlite("SELECT name FROM collections")}
+    for name, n in _read_sqlite(
+        "SELECT c.name, COUNT(*) FROM embeddings e JOIN segments s ON e.segment_id = s.id "
+        "JOIN collections c ON s.collection = c.id GROUP BY c.name"
+    ):
+        counts[name] = n
+    return counts
+
+
+def stored_collection_info() -> dict[str, dict]:
+    """{collection name: {id, configuration (parsed), metadata}}, from chroma.sqlite3."""
+    out: dict[str, dict] = {}
+    for col_id, name, cfg, schema in _read_sqlite(
+        "SELECT id, name, config_json_str, schema_str FROM collections"
+    ):
+        parsed = {}
+        for raw in (cfg, schema):
+            try:
+                parsed.update(json.loads(raw) if raw else {})
+            except ValueError:
+                pass
+        out[name] = {"id": col_id, "configuration": parsed, "metadata": {}}
+    by_id = {info["id"]: info for info in out.values()}
+    for col_id, key, s, i, f, b in _read_sqlite(
+        "SELECT collection_id, key, str_value, int_value, float_value, bool_value FROM collection_metadata"
+    ):
+        if col_id in by_id:
+            by_id[col_id]["metadata"][key] = next((v for v in (s, i, f, b) if v is not None), None)
+    return out
+
+
+def space_from_info(info: dict) -> str | None:
+    """Distance space from stored configuration/metadata (see collection_space)."""
+    cfg = info.get("configuration") or {}
+    # chromadb 1.x keeps the space in the schema: defaults.float_list.vector_index.config.space
+    vector = (((cfg.get("defaults") or {}).get("float_list") or {}).get("vector_index") or {}).get("config") or {}
+    if vector.get("space"):
+        return str(vector["space"])
+    for key in ("hnsw", "spann", "hnsw_configuration"):
+        section = cfg.get(key)
+        if isinstance(section, dict) and section.get("space"):
+            return str(section["space"])
+    space = (info.get("metadata") or {}).get("hnsw:space")
+    return str(space) if space else "l2"  # Chroma's default when nothing was set
 
 
 def sqlite_path() -> str:
