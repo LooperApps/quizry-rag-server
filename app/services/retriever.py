@@ -12,11 +12,12 @@ production enhancements:
 import logging
 import time
 
+import numpy as np
 from litellm import completion
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from app.db.chroma import get_collection, collection_flags, count_for_notebooks, _build_where
+from app.db.chroma import get_collection, collection_flags, collection_space, count_for_notebooks, _build_where
 from app.log_utils import (
     get_trace_id,
     log_chroma_query,
@@ -146,6 +147,62 @@ def _rerank(question: str, chunks: list[ChunkResult]) -> list[ChunkResult]:
 
 # ─── ChromaDB query ───────────────────────────────────────────────────────────
 
+_QUERY_INCLUDE = ["documents", "metadatas", "distances"]
+
+
+def _exact_query(collection, where: dict, vectors: list[list[float]], k: int) -> dict:
+    """
+    Brute-force nearest neighbours over every chunk the filter keeps, in the
+    collection's own distance space, shaped like collection.query()'s result.
+    """
+    got = collection.get(where=where, include=["embeddings", "documents", "metadatas"])
+    ids = list(got.get("ids") or [])
+    out: dict = {"ids": [], "documents": [], "metadatas": [], "distances": []}
+    if not ids:
+        for _ in vectors:
+            for key in out:
+                out[key].append([])
+        return out
+    emb = np.asarray(got["embeddings"], dtype=np.float32)
+    q = np.asarray(vectors, dtype=np.float32)
+    space = collection_space(collection) or "l2"
+    if space == "cosine":
+        emb_n = emb / np.clip(np.linalg.norm(emb, axis=1, keepdims=True), 1e-12, None)
+        q_n = q / np.clip(np.linalg.norm(q, axis=1, keepdims=True), 1e-12, None)
+        dist = 1.0 - q_n @ emb_n.T
+    elif space == "ip":
+        dist = 1.0 - q @ emb.T
+    else:  # squared L2, as hnswlib reports it
+        dist = (q * q).sum(1)[:, None] - 2.0 * (q @ emb.T) + (emb * emb).sum(1)[None, :]
+    k = min(k, len(ids))
+    docs, metas = got.get("documents") or [], got.get("metadatas") or []
+    for row in dist:
+        top = np.argpartition(row, k - 1)[:k]
+        top = top[np.argsort(row[top])]
+        out["ids"].append([ids[i] for i in top])
+        out["documents"].append([docs[i] if i < len(docs) else "" for i in top])
+        out["metadatas"].append([metas[i] if i < len(metas) else {} for i in top])
+        out["distances"].append([float(row[i]) for i in top])
+    return out
+
+
+def _search(collection, where: dict, vectors: list[list[float]], k: int, n: int) -> dict:
+    """
+    Nearest-neighbour search within a filter that matches `n` chunks. Small
+    scopes (a notebook and its lineage) are searched exactly; larger ones use
+    HNSW, falling back to exact search when HNSW comes back short.
+    """
+    want = min(k, n)
+    if n <= settings.exact_search_max:
+        log_step(logger, "CHROMA_QUERY", f"exact search over {n} chunks")
+        return _exact_query(collection, where, vectors, want)
+    raw = collection.query(query_embeddings=vectors, n_results=want, where=where, include=_QUERY_INCLUDE)
+    short = [len(r) for r in (raw.get("ids") or [[]]) if len(r) < want]
+    if short and n <= settings.exact_fallback_max:
+        log_step(logger, "CHROMA_QUERY", f"HNSW returned {short} < {want} — exact search over {n} chunks")
+        return _exact_query(collection, where, vectors, want)
+    return raw
+
 def _query_chroma(
     notebook_ids: list[str],
     query_vector: list[float],
@@ -174,12 +231,7 @@ def _query_chroma(
         log_step(logger, "CHROMA_QUERY", "No matching docs found — returning empty")
         return []
 
-    results = collection.query(
-        query_embeddings=[query_vector],
-        n_results=min(k, n),
-        where=where,
-        include=["documents", "metadatas", "distances"],
-    )
+    results = _search(collection, where, [query_vector], k, n)
 
     # Log the full ChromaDB query result
     log_chroma_query(
@@ -425,12 +477,7 @@ def fetch_multi(
     col = get_collection(collection)
     where = _build_where(notebook_ids, source_ids)
     t1 = time.perf_counter()
-    raw = col.query(
-        query_embeddings=vectors,
-        n_results=min(k, total),
-        where=where,
-        include=["documents", "metadatas", "distances"],
-    )
+    raw = _search(col, where, vectors, k, total)
     ids_per = raw.get("ids") or []
     docs_per = raw.get("documents") or []
     metas_per = raw.get("metadatas") or []

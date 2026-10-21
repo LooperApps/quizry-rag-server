@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     # Retrieval tuning
     retrieval_k: int = 20   # how many docs to pull per query vector
     final_k: int = 10       # how many to return after reranking
+    # Filtered HNSW search misses when the filter keeps a tiny share of a big
+    # collection (one notebook among hundreds): it can return nothing at all.
+    # Scopes up to exact_search_max chunks are searched exactly instead, and a
+    # short HNSW answer falls back to exact search up to exact_fallback_max.
+    exact_search_max: int = 6000
+    exact_fallback_max: int = 50000
 
     # Chunking concurrency (ThreadPoolExecutor workers)
     chunk_workers: int = 3
