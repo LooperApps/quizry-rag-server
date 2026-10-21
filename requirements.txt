@@ -5,17 +5,16 @@ pydantic>=2.7
 pydantic-settings>=2.4
 
 # Vector store
-# chromadb and litellm are deliberately left unpinned: the versions Render has
-# installed are unknown (GET /health reports them), and pinning blind could
-# downgrade the on-disk Chroma format. Pin them to what /health shows before
-# the next dependency change. Code here relies on chromadb>=1.0's
-# `configuration={"hnsw": {...}}` and falls back to the legacy metadata form.
-chromadb>=0.6
+# Pinned to what production runs (GET /health, 2026-10-21): an unpinned deploy
+# can pull a chromadb that migrates the on-disk format, or a litellm that
+# changes provider behaviour. Upgrade deliberately, after a backup of
+# /data/chroma. Code here relies on chromadb>=1.0's `configuration={"hnsw": ...}`.
+chromadb==1.5.9
 
 # LLM + embeddings
 # GEMINI_API_KEY env var used by litellm for embeddings; DEEPSEEK_API_KEY for
 # rewriting/reranking (litellm) and vision (direct HTTP, app/services/vision.py)
-litellm>=1.50
+litellm==1.106.1
 
 # Text extraction
 pypdf>=4.0
